@@ -72,7 +72,9 @@ Query strings may change; session IDs are not
 recorded in completion logs. OTP submission, **Perfekt!**, the old registration
 success marker and the generic `gmx.net/mail` page do not mark success or close
 the browser. The assistant keeps watching for the GMX Navigator mailbox redirect. Errors
-on the final screen keep the browser open with an attention message.
+on the final screen keep a standalone registration open with an attention message.
+In a batch, attempts that need attention are marked failed and their browsers close
+so the next queued registration can start.
 
 Manual completion is disabled. TXT exports and saved-account automation require
 a recorded GMX Navigator mailbox redirect. Older screenshot-based, manually confirmed or
@@ -80,19 +82,18 @@ otherwise unverified records remain saved and are displayed as **unverified**;
 they are excluded from success exports and saved-account selection.
 
 If any tab reaches `https://hilfe.gmx.net/kundenservice/flexreg.html`, the attempt
-fails and its browser closes. The batch stops starting queued attempts, and
-already running accounts may finish. No replacement profile or automatic retry
-is created in response to that redirect. Review the failure before starting a
-new batch. Reserved phone numbers and exit IPs remain reserved.
+fails and its browser closes. In a batch, the worker then starts the next queued
+registration while other workers continue. The failed attempt is not retried
+and no extra attempts are added. Reserved phone numbers and exit IPs remain reserved.
 
 Registration logs identify the batch and account number, so parallel workers can
 be distinguished. Failed attempts include the step, a failure code and a stop
 reason. Recent HTTP/network failures and visible GMX validation errors are
 included when observed. A help redirect without a specific GMX message is
 explicitly reported as an unknown rejection reason. Request bodies, raw response
-bodies, session URL queries and known credentials are not logged. Ordinary failed
-attempts release their worker for the next already queued account; no replacement
-profiles are created after GMX redirects to registration help.
+bodies, session URL queries and known credentials are not logged. Failed attempts,
+including registration-help redirects and attempts that need attention, release
+their worker for the next already queued account.
 
 Unsuccessful registrations save a redacted image before Chrome closes, including
 the GMX help page when it can be captured. Images are stored under

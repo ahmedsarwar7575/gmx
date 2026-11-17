@@ -6,7 +6,8 @@ const { generateProfile } = require('../random.js');
 const path = require('node:path');
 const { diagnosticImage } = require('../artifacts.cjs');
 
-const finished = new Set(['complete', 'failed', 'paused', 'cancelled']);
+// Batch attempts that need manual attention fail so the worker can move on.
+const finished = new Set(['complete', 'failed', 'paused', 'cancelled', 'needs_attention']);
 
 function batchInput({ connectionMode, accountCount, concurrency, proxyText } = {}) {
   if (!['maskify', 'proxy'].includes(connectionMode)) throw new Error('Choose Maskify API or HTTP proxy.');
@@ -60,7 +61,7 @@ class RegistrationBatchRunner extends EventEmitter {
     }).finally(() => {
       options.proxies.fill(''); options.proxies.length = 0;
       run.active = false; run.finishedAt = Date.now();
-      try { this.assistant.store.finishBatch(run.id, run.blocked ? 'blocked' : run.stopping ? 'stopped' : 'complete'); }
+      try { this.assistant.store.finishBatch(run.id, run.stopping ? 'stopped' : 'complete'); }
       catch { run.error = 'Could not save batch completion. Check database permissions and disk space.'; }
       this.publish();
     });
@@ -72,8 +73,8 @@ class RegistrationBatchRunner extends EventEmitter {
     const results = await Promise.allSettled(Array.from({ length: run.concurrency }, async () => {
       while (next < run.jobs.length) {
         const index = next++, job = run.jobs[index];
-        if (run.stopping || run.blocked) {
-          Object.assign(job, { status: 'cancelled', stage: run.blocked ? 'Not started · GMX registration help requires review' : 'Stopped before opening Chrome', finishedAt: Date.now() });
+        if (run.stopping) {
+          Object.assign(job, { status: 'cancelled', stage: 'Stopped before opening Chrome', finishedAt: Date.now() });
           this.publish(); continue;
         }
         await this.executeAccount(run, job, options.proxies[index]);
@@ -92,7 +93,6 @@ class RegistrationBatchRunner extends EventEmitter {
     try {
       const profile = await this.makeProfile();
       signal.throwIfAborted();
-      if (run.blocked) { job.status = 'cancelled'; job.stage = 'Not started · GMX registration help requires review'; return; }
       worker = this.assistant.createWorker({ logLabel: `Batch ${run.id.slice(0, 8)} Account ${job.index}` });
       this.workers.set(job.id, worker);
       update = snapshot => {
@@ -106,11 +106,8 @@ class RegistrationBatchRunner extends EventEmitter {
         job.screenshotUrl = session.failureImageUrl || null;
         job.artifactKind = session.failureArtifactKind || null;
         job.stage = session.stage;
-        if (session.failureCode === 'GMX_REGISTRATION_HELP') {
-          run.blocked = true; run.error = 'GMX opened registration help. New attempts stopped; review the failed registration.';
-        }
         job.status = session.status === 'complete' ? 'success'
-          : session.status === 'cancelled' ? 'cancelled' : ['failed', 'paused'].includes(session.status) ? 'failed' : session.status;
+          : session.status === 'cancelled' ? 'cancelled' : ['failed', 'paused', 'needs_attention'].includes(session.status) ? 'failed' : session.status;
         this.publish();
       };
       worker.on('state', update);
