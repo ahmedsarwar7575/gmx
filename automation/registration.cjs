@@ -45,6 +45,14 @@ function emailHint(value) {
 
 }
 
+function isMailboxUrl(value) {
+  try {
+    const url = new URL(value);
+    return ['https://gmx.net', 'https://www.gmx.net'].includes(url.origin)
+      && ['/mail', '/mail/'].includes(url.pathname);
+  } catch { return false; }
+}
+
 
 
 class RegistrationStore {
@@ -85,10 +93,13 @@ class RegistrationStore {
 
     this.db.exec(`PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS registration_exit_ips (fingerprint TEXT PRIMARY KEY, registration_id TEXT NOT NULL, reserved_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS registration_phone_numbers (fingerprint TEXT PRIMARY KEY, registration_id TEXT NOT NULL, reserved_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS registration_batches (id TEXT PRIMARY KEY, status TEXT NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER);
       CREATE TABLE IF NOT EXISTS registration_batch_accounts (batch_id TEXT NOT NULL, registration_id TEXT NOT NULL UNIQUE, PRIMARY KEY(batch_id, registration_id));`);
 
     fs.chmodSync(this.dbPath, 0o600);
+
+    this.seedPhoneReservations();
 
   }
 
@@ -207,6 +218,40 @@ class RegistrationStore {
     const fingerprint = createHmac('sha256', this.key).update(canonical).digest('hex');
     const result = this.db.prepare('INSERT OR IGNORE INTO registration_exit_ips VALUES (?,?,?)').run(fingerprint, id, Date.now());
     if (!result.changes) throw Object.assign(new Error('This proxy exit IP was already used for a registration attempt. Supply a different exit IP.'), { code: 'IP_REUSED' });
+  }
+
+  phoneFingerprint(record) {
+    const details = phoneDetails(record.phone, record.phoneCountryCode || '', record.country || '');
+    const canonical = `${details.phoneCountryCode || ''}${details.phone || ''}`;
+    if (!/^\+[1-9]\d{7,14}$/.test(canonical)) throw new Error('Enter a valid international phone number.');
+    return createHmac('sha256', this.key).update(`phone\0${canonical}`).digest('hex');
+  }
+
+  seedPhoneReservations() {
+    // Include numbers saved before phone tracking was added. Old duplicates
+    // belong to the earliest saved registration and stay blocked for new ones.
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const insert = this.db.prepare('INSERT OR IGNORE INTO registration_phone_numbers VALUES (?,?,?)');
+      for (const row of this.db.prepare('SELECT id,secret,created_at FROM registrations ORDER BY created_at,id').iterate()) {
+        const record = this.open(row.secret);
+        if (!record.phone) continue;
+        let fingerprint;
+        try { fingerprint = this.phoneFingerprint(record); } catch { continue; }
+        insert.run(fingerprint, row.id, row.created_at);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  reservePhone(details, id) {
+    const fingerprint = this.phoneFingerprint(details);
+    this.db.prepare('INSERT OR IGNORE INTO registration_phone_numbers VALUES (?,?,?)').run(fingerprint, id, Date.now());
+    const owner = this.db.prepare('SELECT registration_id FROM registration_phone_numbers WHERE fingerprint=?').get(fingerprint);
+    if (owner?.registration_id !== id) throw Object.assign(new Error('This phone number was already assigned to another registration. Use a different number.'), { code: 'PHONE_REUSED' });
   }
 
   createBatch(id) { this.db.prepare("INSERT INTO registration_batches VALUES (?,'running',?,NULL)").run(id, Date.now()); }
@@ -451,7 +496,14 @@ const dom = (() => {
 
     let candidate;
 
-    for (const page of (await browser.pages()).reverse()) for (const frame of page.frames()) {
+    const pages = (await browser.pages()).reverse();
+    // Only a top-level GMX mailbox navigation confirms success. Embedded URLs
+    // and URLs merely mentioning GMX must not complete a registration.
+    const mailbox = pages.find(page => isMailboxUrl(page.url()));
+    if (mailbox) return { success: true, mailboxRedirect: true, phase: 'confirmation',
+      page: mailbox, frame: mailbox.mainFrame(), email: null, captcha: false };
+
+    for (const page of pages) for (const frame of page.frames()) {
 
       if (!/^https:\/\/register\.gmx\.net(?:\/|$)/.test(frame.url())) continue;
 
@@ -547,6 +599,8 @@ function phoneDetails(phone = '', countryCode = '', country = '') {
 
   let number = phone.replace(/[ ()-]/g, ''), prefix = countryCode;
 
+  if (number.startsWith('00')) number = `+${number.slice(2)}`;
+
   const defaultPrefix = /^(germany|deutschland|de)$/i.test(country) ? '+49' : /^(switzerland|schweiz|ch)$/i.test(country) ? '+41' : /^(austria|österreich|at)$/i.test(country) ? '+43' : '';
 
   if (number.startsWith('+')) {
@@ -560,6 +614,8 @@ function phoneDetails(phone = '', countryCode = '', country = '') {
   }
 
   prefix ||= defaultPrefix;
+
+  if (['+49', '+41', '+43'].includes(prefix)) number = number.replace(/^0+/, '');
 
   if (!/^\+\d{1,4}$/.test(prefix) || !/^\d{6,15}$/.test(number)) throw new Error('Enter a valid phone number and country calling code.');
 
@@ -721,6 +777,8 @@ class RegistrationAssistant extends EventEmitter {
         state: { id, status: 'starting', phase: 'profile', stage: 'Opening GMX registration', connectionMode: connection.mode, emailHint: 'Email not chosen yet', passwordReady: true, updatedAt: Date.now() } });
 
       this.publish();
+
+      if (profile.phone) this.store.reservePhone(profile, id);
 
 
 
@@ -940,7 +998,10 @@ class RegistrationAssistant extends EventEmitter {
 
           const deadline = Date.now() + 120_000;
 
-          while ((await dom.scan(this.browser))?.phase !== 'profile') {
+          while (true) {
+
+            const initial = await dom.scan(this.browser);
+            if (initial?.success || initial?.phase === 'profile') break;
 
             if (this.stopped) throw new Error('Registration was closed.');
 
@@ -1046,6 +1107,8 @@ class RegistrationAssistant extends EventEmitter {
       const heroSMS = { activationId: String(number.activationId) };
 
       this.redactions.add(number.phoneNumber); this.redactions.add(details.phone); this.redactions.add(heroSMS.activationId);
+
+      this.store.reservePhone(details, id);
 
       this.store.update(id, { ...details, heroSMS });
 
@@ -1343,7 +1406,11 @@ class RegistrationAssistant extends EventEmitter {
 
     }
 
-    if (view.success) { this.setState('complete', 'GMX confirmed successful account creation', 'confirmation'); this.store.update(this.activeId, { completedAt: Date.now() }); return; }
+    if (view.success) {
+      this.store.update(this.activeId, { completedAt: Date.now(), completionSource: view.mailboxRedirect ? 'mailbox_redirect' : 'success_marker' });
+      this.setState('complete', view.mailboxRedirect ? 'GMX opened the mailbox · account creation complete' : 'GMX confirmed successful account creation', 'confirmation');
+      return;
+    }
 
     if (view.key !== this.currentKey) {
 
@@ -1483,7 +1550,9 @@ class RegistrationAssistant extends EventEmitter {
 
     if (this.state?.status !== 'awaiting_phone') throw new Error('GMX is not waiting for a phone number.');
 
-    this.store.update(this.activeId, { ...phoneDetails(phone, countryCode), heroSMS: null }); this.phoneApproved = true; this.prepared = null;
+    const details = phoneDetails(phone, countryCode);
+    this.store.reservePhone(details, this.activeId);
+    this.store.update(this.activeId, { ...details, heroSMS: null }); this.phoneApproved = true; this.prepared = null;
 
     this.smsPoll = null; this.smsController?.abort();
 

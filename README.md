@@ -65,6 +65,18 @@ Mobile first, then Lycamobile only after an explicit stock or payment rejection.
 Uncertain purchase failures are not automatically retried. SMS reads reuse the
 same activation; manual phone and code entry remain available.
 
+Reaching `https://gmx.net/mail` or `https://www.gmx.net/mail` also confirms
+registration success; changing query strings do not affect detection. The existing
+successful-registration marker remains supported.
+
+Phone numbers are normalized and reserved in the database before submission.
+HeroSMS numbers already assigned to another registration are rejected without an
+automatic replacement purchase. The same registration can continue checking its
+existing activation. Reservations cover parallel workers and survive restarts;
+existing saved phone numbers are included when the database opens. Failed and
+cancelled attempts retain their number reservations. Manual phone entry uses
+the same duplicate check.
+
 Failed attempts are reported separately. The batch runs the requested number
 of attempts without creating replacement accounts automatically. **Stop batch**
 cancels active and queued attempts while keeping confirmed successes. Each
