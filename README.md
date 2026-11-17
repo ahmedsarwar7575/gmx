@@ -60,8 +60,8 @@ this version; registrations made before IP tracking was added have no saved IP.
 
 Each account gets its own Chrome profile. The assistant generates account
 details, fills recognized GMX forms and advances through registration. A phone
-number is purchased only after the phone form is reached. HeroSMS tries Ortel
-Mobile first, then Lycamobile only after an explicit stock or payment rejection.
+number is purchased only after the phone form is reached. HeroSMS tries Lycamobile
+first, then Ortel Mobile only after an explicit stock or payment rejection.
 Uncertain purchase failures are not automatically retried. SMS reads reuse the
 same activation; manual phone and code entry remain available.
 

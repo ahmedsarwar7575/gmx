@@ -5,8 +5,8 @@ const heroSMS = createHeroSmsClient();
 const COUNTRY_ID = 43; // Germany
 const SERVICE_CODE = "abk"; // GMX
 const OPERATORS = [
-  { code: 'ortel_mobile', name: 'Ortel Mobile' },
   { code: 'lycamobile', name: 'Lycamobile' },
+  { code: 'ortel_mobile', name: 'Ortel Mobile' },
 ];
 const PAYMENT_CODES = new Set(['NO_BALANCE', 'INSUFFICIENT_BALANCE', 'INSUFFICIENT_FUNDS', 'PAYMENT_REQUIRED']);
 
@@ -223,8 +223,8 @@ async function getGermanNumber() {
       activationEndTime: result.activationEndTime ?? null,
     };
   }
-  if (paymentRejected) throw Object.assign(new Error('HeroSMS rejected payment for the available Ortel Mobile / Lycamobile numbers (HTTP_402 / NO_BALANCE). Check your balance and operator pricing in HeroSMS.'), { code: 'HEROSMS_PAYMENT_REQUIRED' });
-  throw new Error('No German Ortel Mobile or Lycamobile numbers are currently available for GMX on HeroSMS. Try again later.');
+  if (paymentRejected) throw Object.assign(new Error('HeroSMS rejected payment for the available Lycamobile / Ortel Mobile numbers (HTTP_402 / NO_BALANCE). Check your balance and operator pricing in HeroSMS.'), { code: 'HEROSMS_PAYMENT_REQUIRED' });
+  throw new Error('No German Lycamobile or Ortel Mobile numbers are currently available for GMX on HeroSMS. Try again later.');
 }
 
 // ==========================================

@@ -12,7 +12,10 @@ const { isIP } = require('node:net');
 
 const { setTimeout: sleep } = require('node:timers/promises');
 
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+
+puppeteer.use(StealthPlugin());
 
 const { Router } = require('express');
 const multer = require('multer');
@@ -937,8 +940,6 @@ class RegistrationAssistant extends EventEmitter {
 
         timeout: 60_000,
 
-        userDataDir,
-
         args: [
 
           '--start-maximized',
@@ -952,6 +953,7 @@ class RegistrationAssistant extends EventEmitter {
           '--disable-background-networking',
 
           '--disable-quic',
+          '--disable-blink-features=AutomationControlled',
 
           '--proxy-bypass-list=<-loopback>',
 
@@ -965,7 +967,14 @@ class RegistrationAssistant extends EventEmitter {
 
       this.smsController.signal.throwIfAborted();
 
-
+const fp = await page.evaluate(() => ({
+  ua: navigator.userAgent,
+  platform: navigator.platform,
+  languages: navigator.languages,
+  webdriver: navigator.webdriver,
+  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+}));
+console.log(fp);
 
       const installed = new WeakMap();
 
