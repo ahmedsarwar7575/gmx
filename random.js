@@ -2,17 +2,13 @@ const crypto = require("crypto");
 const { createHeroSmsClient } = require("./herosms-client.cjs");
 const heroSMS = createHeroSmsClient();
 
-const COUNTRY_ID = 43; // Germany
-const SERVICE_CODE = "abk"; // GMX
+const COUNTRY_ID = 43;
+const SERVICE_CODE = "abk";
 const OPERATORS = [
   { code: 'lycamobile', name: 'Lycamobile' },
   { code: 'ortel_mobile', name: 'Ortel Mobile' },
 ];
 const PAYMENT_CODES = new Set(['NO_BALANCE', 'INSUFFICIENT_BALANCE', 'INSUFFICIENT_FUNDS', 'PAYMENT_REQUIRED']);
-
-// ==========================================
-// 50 SPANISH FIRST NAMES
-// ==========================================
 
 const firstNames = [
   "Alejandro", "Carlos", "Miguel", "Javier", "Daniel",
@@ -27,10 +23,6 @@ const firstNames = [
   "Bruno", "Hector", "Guillermo", "Ignacio", "Tomas"
 ];
 
-// ==========================================
-// 50 SPANISH LAST NAMES
-// ==========================================
-
 const lastNames = [
   "Garcia", "Rodriguez", "Gonzalez", "Fernandez", "Lopez",
   "Martinez", "Sanchez", "Perez", "Gomez", "Martin",
@@ -44,72 +36,58 @@ const lastNames = [
   "Lozano", "Guerrero", "Cano", "Prieto", "Mendez"
 ];
 
-// ==========================================
-// 50 GERMAN ADDRESS TEMPLATES
-// Synthetic test addresses, not verified
-// residential or delivery addresses.
-// ==========================================
-
 const addresses = [
-  { city: "Berlin", zip: "10115", street: "Musterstrasse" },
-  { city: "Hamburg", zip: "20095", street: "Beispielweg" },
-  { city: "Munich", zip: "80331", street: "Teststrasse" },
-  { city: "Cologne", zip: "50667", street: "Musterweg" },
-  { city: "Frankfurt", zip: "60311", street: "Beispielstrasse" },
-  { city: "Stuttgart", zip: "70173", street: "Testweg" },
-  { city: "Dusseldorf", zip: "40213", street: "Demostrasse" },
-  { city: "Leipzig", zip: "04109", street: "Musterallee" },
-  { city: "Dortmund", zip: "44135", street: "Beispielallee" },
-  { city: "Essen", zip: "45127", street: "Testallee" },
-
-  { city: "Bremen", zip: "28195", street: "Musterplatz" },
-  { city: "Dresden", zip: "01067", street: "Beispielplatz" },
-  { city: "Hanover", zip: "30159", street: "Testplatz" },
-  { city: "Nuremberg", zip: "90402", street: "Demoweg" },
-  { city: "Duisburg", zip: "47051", street: "Musterpfad" },
-  { city: "Bochum", zip: "44787", street: "Beispielpfad" },
-  { city: "Wuppertal", zip: "42103", street: "Testpfad" },
-  { city: "Bielefeld", zip: "33602", street: "Demopfad" },
-  { city: "Bonn", zip: "53111", street: "Musterallee" },
-  { city: "Munster", zip: "48143", street: "Beispielallee" },
-
-  { city: "Karlsruhe", zip: "76133", street: "Teststrasse" },
-  { city: "Mannheim", zip: "68159", street: "Demostrasse" },
-  { city: "Augsburg", zip: "86150", street: "Musterweg" },
-  { city: "Wiesbaden", zip: "65183", street: "Beispielweg" },
-  { city: "Gelsenkirchen", zip: "45879", street: "Testweg" },
-  { city: "Monchengladbach", zip: "41061", street: "Demoweg" },
-  { city: "Braunschweig", zip: "38100", street: "Musterplatz" },
-  { city: "Chemnitz", zip: "09111", street: "Beispielplatz" },
-  { city: "Kiel", zip: "24103", street: "Testplatz" },
-  { city: "Aachen", zip: "52062", street: "Demoplatz" },
-
-  { city: "Halle", zip: "06108", street: "Musterstrasse" },
-  { city: "Magdeburg", zip: "39104", street: "Beispielstrasse" },
-  { city: "Freiburg", zip: "79098", street: "Teststrasse" },
-  { city: "Krefeld", zip: "47798", street: "Demostrasse" },
-  { city: "Lubeck", zip: "23552", street: "Musterweg" },
-  { city: "Oberhausen", zip: "46045", street: "Beispielweg" },
-  { city: "Erfurt", zip: "99084", street: "Testweg" },
-  { city: "Mainz", zip: "55116", street: "Demoweg" },
-  { city: "Rostock", zip: "18055", street: "Musterallee" },
-  { city: "Kassel", zip: "34117", street: "Beispielallee" },
-
-  { city: "Hagen", zip: "58095", street: "Testallee" },
-  { city: "Potsdam", zip: "14467", street: "Demoallee" },
-  { city: "Saarbrucken", zip: "66111", street: "Musterstrasse" },
-  { city: "Hamm", zip: "59065", street: "Beispielstrasse" },
-  { city: "Ludwigshafen", zip: "67059", street: "Teststrasse" },
-  { city: "Oldenburg", zip: "26122", street: "Demostrasse" },
-  { city: "Osnabruck", zip: "49074", street: "Musterweg" },
-  { city: "Leverkusen", zip: "51373", street: "Beispielweg" },
-  { city: "Heidelberg", zip: "69117", street: "Testweg" },
-  { city: "Darmstadt", zip: "64283", street: "Demoweg" }
+  { city: "Berlin", zip: "10115", street: "Brunnenstrasse" },
+  { city: "Hamburg", zip: "20095", street: "Bergstrasse" },
+  { city: "Munich", zip: "80331", street: "Sendlinger Strasse" },
+  { city: "Cologne", zip: "50667", street: "Breite Strasse" },
+  { city: "Frankfurt am Main", zip: "60311", street: "Bleichstrasse" },
+  { city: "Stuttgart", zip: "70173", street: "Koenigstrasse" },
+  { city: "Duesseldorf", zip: "40213", street: "Wallstrasse" },
+  { city: "Leipzig", zip: "04109", street: "Bruehl" },
+  { city: "Dortmund", zip: "44135", street: "Hohe Strasse" },
+  { city: "Essen", zip: "45127", street: "Limbecker Strasse" },
+  { city: "Bremen", zip: "28195", street: "Soegestrasse" },
+  { city: "Dresden", zip: "01067", street: "Prager Strasse" },
+  { city: "Hanover", zip: "30159", street: "Lister Meile" },
+  { city: "Nuremberg", zip: "90402", street: "Ludwigsplatz" },
+  { city: "Duisburg", zip: "47051", street: "Mercatorstrasse" },
+  { city: "Bochum", zip: "44787", street: "Massenbergstrasse" },
+  { city: "Wuppertal", zip: "42103", street: "Friedrich-Engels-Allee" },
+  { city: "Bielefeld", zip: "33602", street: "Ritterstrasse" },
+  { city: "Bonn", zip: "53111", street: "Wenzelgasse" },
+  { city: "Muenster", zip: "48143", street: "Salzstrasse" },
+  { city: "Karlsruhe", zip: "76133", street: "Waldstrasse" },
+  { city: "Mannheim", zip: "68159", street: "Rheinstrasse" },
+  { city: "Augsburg", zip: "86150", street: "Annabergstrasse" },
+  { city: "Wiesbaden", zip: "65183", street: "Langgasse" },
+  { city: "Gelsenkirchen", zip: "45879", street: "Hauptstrasse" },
+  { city: "Moenchengladbach", zip: "41061", street: "Bismarckstrasse" },
+  { city: "Braunschweig", zip: "38100", street: "Hagenbruecke" },
+  { city: "Chemnitz", zip: "09111", street: "Innere Klosterstrasse" },
+  { city: "Kiel", zip: "24103", street: "Daenische Strasse" },
+  { city: "Aachen", zip: "52062", street: "Pontstrasse" },
+  { city: "Halle", zip: "06108", street: "Grosse Steintrasse" },
+  { city: "Magdeburg", zip: "39104", street: "Hasselbachstrasse" },
+  { city: "Freiburg", zip: "79098", street: "Bertoldstrasse" },
+  { city: "Krefeld", zip: "47798", street: "Friedrichstrasse" },
+  { city: "Luebeck", zip: "23552", street: "Fleischhauerstrasse" },
+  { city: "Oberhausen", zip: "46045", street: "Friedrich-Karl-Strasse" },
+  { city: "Erfurt", zip: "99084", street: "Johannesstrasse" },
+  { city: "Mainz", zip: "55116", street: "Grosse Bleiche" },
+  { city: "Rostock", zip: "18055", street: "Breite Strasse" },
+  { city: "Kassel", zip: "34117", street: "Treppenstrasse" },
+  { city: "Hagen", zip: "58095", street: "Kampstrasse" },
+  { city: "Potsdam", zip: "14467", street: "Friedrich-Ebert-Strasse" },
+  { city: "Saarbruecken", zip: "66111", street: "Kaiserstrasse" },
+  { city: "Hamm", zip: "59065", street: "Bahnhofstrasse" },
+  { city: "Ludwigshafen", zip: "67059", street: "Bismarckstrasse" },
+  { city: "Oldenburg", zip: "26122", street: "Achternstrasse" },
+  { city: "Osnabrueck", zip: "49074", street: "Krahnstrasse" },
+  { city: "Leverkusen", zip: "51373", street: "Duesseldorfer Strasse" },
+  { city: "Heidelberg", zip: "69117", street: "Hauptstrasse" },
+  { city: "Darmstadt", zip: "64283", street: "Schulstrasse" }
 ];
-
-// ==========================================
-// RANDOM HELPERS
-// ==========================================
 
 function randomItem(array) {
   return array[crypto.randomInt(array.length)];
@@ -118,11 +96,6 @@ function randomItem(array) {
 function randomNumber(min, max) {
   return crypto.randomInt(min, max + 1);
 }
-
-// ==========================================
-// RANDOM BIRTHDAY
-// Age between 18 and 60
-// ==========================================
 
 function generateBirthday() {
   const today = new Date();
@@ -147,10 +120,6 @@ function generateBirthday() {
 
   return `${year}-${month}-${day}`;
 }
-
-// ==========================================
-// RANDOM STRONG PASSWORD
-// ==========================================
 
 function generatePassword(length = 14) {
   const uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -179,17 +148,9 @@ function generatePassword(length = 14) {
   return chars.join("");
 }
 
-// ==========================================
-// RANDOM GENDER
-// ==========================================
-
 function generateGender() {
   return randomItem(["Male", "Female", "Diverse"]);
 }
-
-// ==========================================
-// PURCHASE GERMAN NUMBER FROM HERO SMS
-// ==========================================
 
 async function getGermanNumber({ signal } = {}) {
   let paymentRejected = false;
@@ -200,8 +161,6 @@ async function getGermanNumber({ signal } = {}) {
       result = await heroSMS('getNumberV2', { country: COUNTRY_ID, service: SERVICE_CODE, operator: operator.code }, { signal });
     } catch (error) {
       signal?.throwIfAborted();
-      // An explicit refusal has not allocated a number. A network failure or
-      // lost purchase response is uncertain, so never try another purchase.
       if (error.httpStatus === 402 || PAYMENT_CODES.has(error.providerCode)) { paymentRejected = true; continue; }
       if (error.providerCode === 'NO_NUMBERS') continue;
       throw error;
@@ -230,10 +189,6 @@ async function getGermanNumber({ signal } = {}) {
   throw new Error('No German Lycamobile or Ortel Mobile numbers are currently available for GMX on HeroSMS. Try again later.');
 }
 
-// ==========================================
-// CHECK SMS STATUS
-// ==========================================
-
 async function getSMS(activationId, { signal } = {}) {
   if (!activationId) {
     throw new Error("Activation ID is required");
@@ -243,7 +198,6 @@ async function getSMS(activationId, { signal } = {}) {
     id: activationId
   }, { signal });
 
-  // Standard HeroSMS responses are plain text.
   const response = String(result);
 
   if (response.startsWith("STATUS_OK:")) {
@@ -302,10 +256,6 @@ async function checkSmsProvider({ signal } = {}) {
   }
 }
 
-// ==========================================
-// WAIT FOR SMS
-// ==========================================
-
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -343,10 +293,6 @@ async function waitForSMS(
     otp: null
   };
 }
-
-// ==========================================
-// GENERATE PROFILE WITH REAL HERO SMS NUMBER
-// ==========================================
 
 function generateProfile() {
   const firstName = randomItem(firstNames);
@@ -395,10 +341,6 @@ async function generatePerson() {
   };
 }
 
-// ==========================================
-// CLI
-// ==========================================
-
 async function main() {
   const command = process.argv[2] || "generate";
   const activationId = process.argv[3];
@@ -445,10 +387,6 @@ async function main() {
   }
 }
 
-// ==========================================
-// EXPORT FOR OTHER FILES
-// ==========================================
-
 module.exports = {
   generateProfile,
   generatePerson,
@@ -460,7 +398,6 @@ module.exports = {
   heroSMS
 };
 
-// Run only when executed directly
 if (require.main === module) {
   main().catch(error => {
     console.error(

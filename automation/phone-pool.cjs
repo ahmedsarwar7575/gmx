@@ -3,7 +3,7 @@ const { setTimeout: sleep } = require('node:timers/promises');
 const { abortable } = require('../async-control.cjs');
 
 const PHONE_TTL_MS = 20 * 60_000;
-const MAX_PHONE_USES = 3;
+const MAX_PHONE_USES = 1;
 const MIN_PHONE_REMAINING_MS = 2 * 60_000;
 
 function sharedProviderFailure(error) {
@@ -65,7 +65,7 @@ class PhoneNumberPool {
   }
 
   expire() {
-    this.store.db.prepare("UPDATE registration_phone_pool SET uses=3,leased_to=NULL,retired_reason='expired' WHERE expires_at<=? AND retired_reason IS NULL").run(this.now());
+    this.store.db.prepare("UPDATE registration_phone_pool SET uses=?,leased_to=NULL,retired_reason='expired' WHERE expires_at<=? AND retired_reason IS NULL").run(MAX_PHONE_USES, this.now());
   }
 
   transaction(work) {
@@ -81,7 +81,7 @@ class PhoneNumberPool {
   claimAvailable(id) {
     return this.transaction(() => {
       this.expire();
-      const row = this.store.db.prepare('SELECT * FROM registration_phone_pool WHERE uses<3 AND leased_to IS NULL AND retired_reason IS NULL AND expires_at>=? ORDER BY expires_at,fingerprint LIMIT 1').get(this.now() + this.minRemainingMs);
+      const row = this.store.db.prepare('SELECT * FROM registration_phone_pool WHERE uses<? AND leased_to IS NULL AND retired_reason IS NULL AND expires_at>=? ORDER BY expires_at,fingerprint LIMIT 1').get(MAX_PHONE_USES, this.now() + this.minRemainingMs);
       if (!row) return null;
       this.store.db.prepare('UPDATE registration_phone_pool SET uses=uses+1,leased_to=? WHERE fingerprint=?').run(id, row.fingerprint);
       return this.lease({ ...row, uses: row.uses + 1 });
@@ -104,7 +104,7 @@ class PhoneNumberPool {
         .run(fingerprint, secret, acquiredAt, expiresAt, reason ? MAX_PHONE_USES : 1, reason ? null : id, reason, now);
       return { fingerprint, secret, uses: reason ? MAX_PHONE_USES : 1, expires_at: expiresAt };
     });
-    if (reason) throw Object.assign(new Error(`HeroSMS number cannot be used (${reason}). It was retired at 3/3.`), {
+    if (reason) throw Object.assign(new Error(`HeroSMS number cannot be used (${reason}). It was retired at ${MAX_PHONE_USES}/${MAX_PHONE_USES}.`), {
       code: reason === 'expired' ? 'PHONE_EXPIRED' : reason === 'insufficient remaining time' ? 'PHONE_LIFETIME_TOO_SHORT' : 'PHONE_ACTIVATION_INVALID' });
     return this.lease(row);
   }
@@ -173,7 +173,7 @@ class PhoneNumberPool {
   retire(id, reason = 'registration failed') {
     const row = this.store.db.prepare('SELECT * FROM registration_phone_pool WHERE leased_to=?').get(id);
     if (!row) return null;
-    this.store.db.prepare('UPDATE registration_phone_pool SET uses=3,leased_to=NULL,retired_reason=? WHERE fingerprint=?').run(reason, row.fingerprint);
+    this.store.db.prepare('UPDATE registration_phone_pool SET uses=?,leased_to=NULL,retired_reason=? WHERE fingerprint=?').run(MAX_PHONE_USES, reason, row.fingerprint);
     return { uses: MAX_PHONE_USES, expiresAt: row.expires_at, reason };
   }
 

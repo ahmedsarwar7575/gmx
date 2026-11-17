@@ -1,8 +1,13 @@
 const { setTimeout: sleep } = require("node:timers/promises");
+const crypto = require("node:crypto");
 const https = require("node:https");
 const { parseProxy, openProxy } = require("../proxy.cjs");
 
 const CAPTCHA_HOSTS = ["auth.gmx.net", "mailset-root.gmx.net", "register.gmx.net"];
+
+function createStateKey() {
+  return `_${crypto.randomBytes(8).toString("hex")}`;
+}
 
 function requestApi(url, { method, headers, body, signal }) {
   return new Promise((resolve, reject) => {
@@ -25,15 +30,16 @@ function requestApi(url, { method, headers, body, signal }) {
   });
 }
 
-async function installCaptchaCapture(page, hosts = CAPTCHA_HOSTS) {
-  await page.evaluateOnNewDocument((allowed) => {
+async function installCaptchaCapture(page, hosts = CAPTCHA_HOSTS, stateKey = createStateKey()) {
+  await page.evaluateOnNewDocument((allowed, key) => {
     if (!allowed.includes(location.hostname)) return;
     const capture = { documentId: crypto.randomUUID(), widgets: [] };
-    window.__gmxCaptchaCapture = capture;
+    Object.defineProperty(window, key, { value: capture, configurable: true, enumerable: false, writable: false });
+    const wrapped = new WeakSet();
     let api;
     const wrap = (value) => {
-      if (!value || value.__gmxWrapped) return value;
-      value.__gmxWrapped = true;
+      if (!value || wrapped.has(value)) return value;
+      wrapped.add(value);
       const autoWidgets = () => {
         for (const element of document.querySelectorAll('.captchafox[data-sitekey]')) {
           if (capture.widgets.some((widget) => widget.element === element)) continue;
@@ -84,7 +90,8 @@ async function installCaptchaCapture(page, hosts = CAPTCHA_HOSTS) {
       get: () => api,
       set: (value) => { api = wrap(value); },
     });
-  }, hosts);
+  }, hosts, stateKey);
+  return stateKey;
 }
 
 function createCaptchaSolver(env, { hosts = CAPTCHA_HOSTS, fetchImpl = requestApi, wait = sleep, log = console.log, signal } = {}) {
@@ -93,6 +100,7 @@ function createCaptchaSolver(env, { hosts = CAPTCHA_HOSTS, fetchImpl = requestAp
   const proxy = parseProxy(env.GMX_PROXY_URL.trim());
   const key = env.ANYSOLVER_API_KEY.trim();
   const attempted = new WeakMap();
+  const stateKey = createStateKey();
   let forwarder;
 
   async function call(endpoint, params) {
@@ -116,7 +124,6 @@ function createCaptchaSolver(env, { hosts = CAPTCHA_HOSTS, fetchImpl = requestAp
     let result;
     try { result = await response.json(); } catch { throw new Error("INVALID_RESPONSE"); }
     if (result.errorId !== 0 || result.status === "failed") {
-      // Providers can echo proxy credentials or tokens in their error details.
       const code = /^[A-Z][A-Z0-9_]{0,79}$/.test(result.errorCode || "") ? result.errorCode : "SERVICE_ERROR";
       throw new Error(code);
     }
@@ -144,7 +151,7 @@ function createCaptchaSolver(env, { hosts = CAPTCHA_HOSTS, fetchImpl = requestAp
       }
     },
     async preparePage(page) {
-      await installCaptchaCapture(page, hosts);
+      await installCaptchaCapture(page, hosts, stateKey);
     },
     async trySolve(frame) {
       log("Polling for CaptchaFox widget to render (up to 40s)...");
@@ -178,10 +185,10 @@ function createCaptchaSolver(env, { hosts = CAPTCHA_HOSTS, fetchImpl = requestAp
         return false;
       }
 
-      const metadata = await frame.evaluate((allowed) => {
+      const metadata = await frame.evaluate((allowed, key) => {
         if (!allowed.includes(location.hostname)) return { error: "Host not allowed" };
-        const capture = window.__gmxCaptchaCapture;
-        if (!capture) return { error: "Capture hook missing" };
+        const capture = window[key];
+        if (!capture) return { error: "Capture state missing" };
 
         const index = capture.widgets.findLastIndex((w) => w.element?.isConnected && w.sitekey
           && (typeof w.onVerify === "function" || typeof w.executeResolve === "function"));
@@ -199,7 +206,7 @@ function createCaptchaSolver(env, { hosts = CAPTCHA_HOSTS, fetchImpl = requestAp
           userAgent: navigator.userAgent,
           apiServer,
         };
-      }, hosts).catch((e) => ({ error: e.message }));
+      }, hosts, stateKey).catch((e) => ({ error: e.message }));
 
       if (metadata.error) {
         log(`Metadata error: ${metadata.error}`);
@@ -215,8 +222,6 @@ function createCaptchaSolver(env, { hosts = CAPTCHA_HOSTS, fetchImpl = requestAp
 
       log(`Found widget! Sitekey: ${metadata.websiteKey.substring(0, 10)}...`);
 
-      // Reserve before sending: a failed or lost response must not replay a
-      // potentially paid request for this widget on the next registration poll.
       seen.add(attempt);
       attempted.set(frame, seen);
 
@@ -252,8 +257,8 @@ function createCaptchaSolver(env, { hosts = CAPTCHA_HOSTS, fetchImpl = requestAp
 
         log("Injecting token into the widget...");
 
-        const delivered = await frame.evaluate(({ token, documentId, index }) => {
-          const capture = window.__gmxCaptchaCapture;
+        const delivered = await frame.evaluate(({ token, documentId, index, key }) => {
+          const capture = window[key];
           const widget = capture?.documentId === documentId && capture.widgets[index];
           if (!widget?.element?.isConnected) return false;
 
@@ -281,7 +286,7 @@ function createCaptchaSolver(env, { hosts = CAPTCHA_HOSTS, fetchImpl = requestAp
             called = true;
           }
           return called || !!textarea;
-        }, { token, documentId: metadata.documentId, index: metadata.index }).catch(() => false);
+        }, { token, documentId: metadata.documentId, index: metadata.index, key: stateKey }).catch(() => false);
 
         if (!delivered) throw new Error("WIDGET_CHANGED_OR_REMOVED");
 

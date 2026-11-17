@@ -232,14 +232,12 @@ class RegistrationStore {
       .run(Date.now());
 
     this.db.prepare("UPDATE registration_batches SET status='interrupted',finished_at=? WHERE status='running'").run(Date.now());
-    this.db.prepare("UPDATE registration_phone_pool SET uses=3,leased_to=NULL,retired_reason='server interrupted' WHERE leased_to IS NOT NULL").run();
+    this.db.prepare("UPDATE registration_phone_pool SET uses=?,leased_to=NULL,retired_reason='server interrupted' WHERE leased_to IS NOT NULL").run(MAX_PHONE_USES);
 
   }
 
   reserveExitIp(ip, id) {
     if (!isIP(ip)) throw new Error('Proxy IP check returned an invalid IP address.');
-    // Normalize IPv6 spellings and IPv4-mapped IPv6 before making an atomic,
-    // durable reservation. Failed attempts deliberately keep their reservation.
     let canonical = isIP(ip) === 6 ? new URL(`http://[${ip}]/`).hostname.slice(1, -1) : ip;
     const mapped = canonical.match(/^::ffff:([a-f0-9]+):([a-f0-9]+)$/);
     if (mapped) {
@@ -259,8 +257,6 @@ class RegistrationStore {
   }
 
   seedPhoneReservations() {
-    // Include numbers saved before phone tracking was added. Old duplicates
-    // belong to the earliest saved registration and stay blocked for new ones.
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const insert = this.db.prepare('INSERT OR IGNORE INTO registration_phone_numbers VALUES (?,?,?)');
@@ -494,8 +490,6 @@ const dom = (() => {
       }).join(' ');
       const summaryEmails = [...new Set((visibleText.match(/[A-Z0-9._%+-]+@gmx\.de\b/gi) || []).map(value => value.toLowerCase()))];
       const finalHeading = all.some(el => visible(el) && el.matches('h1,h2,h3,[role="heading"]') && /^Perfekt\s*!?$/i.test(el.textContent.trim()));
-      // Capture the chosen address on the final panel, then continue waiting
-      // for the actual mailbox redirect. A panel or OTP alone is insufficient.
       const summaryPage = finalHeading && summaryEmails.length === 1 && /GMX\s*FreeMail/i.test(visibleText)
         && /E-Mail\s*:/i.test(visibleText) && /Cloud\s*:/i.test(visibleText) && /News\s*:/i.test(visibleText)
         && /Vertragszusammenfassung|Zustimmen\s+und\s+weiter/i.test(visibleText);
@@ -561,8 +555,6 @@ const dom = (() => {
     const pages = (await browser.pages()).reverse();
     const help = pages.find(page => isRegistrationHelpUrl(page.url()));
     if (help) return { registrationHelp: true, page: help, phase: 'unknown' };
-    // Only a top-level GMX mailbox navigation confirms success. Embedded URLs
-    // and URLs merely mentioning GMX must not complete a registration.
     const mailbox = pages.find(page => isMailboxUrl(page.url()));
     if (mailbox) return { success: true, mailboxRedirect: true, phase: 'confirmation',
       page: mailbox, frame: mailbox.mainFrame(), email: null, captcha: false };
@@ -802,7 +794,7 @@ class RegistrationAssistant extends EventEmitter {
   reportBrowserSetupIssue(operation, error, id = this.activeId) {
     if (this.stopped || this.activeId !== id) return;
     try { this.addLog(`[WARN] Browser setup (${operation}): ${this.safeError(error)}`); }
-    catch { /* Logging must not turn an optional setup failure into a registration failure. */ }
+    catch { }
   }
 
   auditBrowserPage(page, stage, id = this.activeId) {
@@ -965,7 +957,7 @@ class RegistrationAssistant extends EventEmitter {
 
         });
 
-        this.addLog('Using a Maskify German sticky session for registration and CAPTCHA.');
+        this.addLog('Maskify sticky session requested for registration and CAPTCHA (country=DE; exit country will be verified before GMX).');
 
       }
 
@@ -993,6 +985,9 @@ class RegistrationAssistant extends EventEmitter {
 
       this.smsController.signal.throwIfAborted();
 
+      const userDataDir = path.join(path.dirname(this.store.dbPath), 'browser-profiles', id);
+      fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
+
       this.browser = await abortable(() => this.launch({
 
         headless: false,
@@ -1001,11 +996,14 @@ class RegistrationAssistant extends EventEmitter {
 
         timeout: 60_000,
 
+        userDataDir,
+
         args: [
 
           '--start-maximized',
           '--lang=de-DE',
-          '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+          '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+          '--enforce-webrtc-ip-permission-check',
           '--dns-prefetch-disable',
           '--disable-background-networking',
           '--disable-quic',
@@ -1047,16 +1045,18 @@ class RegistrationAssistant extends EventEmitter {
           await page.setExtraHTTPHeaders({ 'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8' });
 
           if (typeof page.createCDPSession === 'function') {
-
-            const session = await page.createCDPSession().catch(error => {
-              this.reportBrowserSetupIssue('CDP session', error, id);
-              return null;
-            });
-
-            if (session) await session.send('Emulation.setLocaleOverride', { locale: 'de-DE' }).catch(error => {
-              this.reportBrowserSetupIssue('locale', error, id);
-            });
-
+            const session = await page.createCDPSession().catch(() => null);
+            if (session) {
+              await session.send('Emulation.setLocaleOverride', { locale: 'de-DE' }).catch(() => {});
+              try {
+                const ua = await page.browser().userAgent();
+                await session.send('Emulation.setUserAgentOverride', {
+                  userAgent: ua,
+                  acceptLanguage: 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
+                  platform: 'Win32',
+                });
+              } catch {}
+            }
           }
 
           page.on('requestfailed', request => {
@@ -1129,11 +1129,30 @@ class RegistrationAssistant extends EventEmitter {
 
           if (!isIP(ip)) throw new Error('Proxy IP check returned an invalid IP address.');
 
+          let country = null;
+          try {
+            country = await step(() => this.page.evaluate(async () => {
+              try {
+                const response = await fetch('https://ipinfo.io/json', { cache: 'no-store' });
+                if (!response.ok) return null;
+                const data = await response.json();
+                return typeof data?.country === 'string' ? data.country.toUpperCase() : null;
+              } catch { return null; }
+            }));
+          } catch { country = null; }
+
+          if (country && country !== 'DE') {
+            throw Object.assign(
+              new Error(`Proxy exit is not German (country=${country}). Supply a German residential exit or retry with a new Maskify session.`),
+              { code: 'IP_NOT_GERMAN' }
+            );
+          }
+
           this.store.reserveExitIp(ip, id);
 
           this.exitIpReserved = true;
 
-          this.addLog(`Proxy public IP: ${ip}`);
+          this.addLog(`Proxy public IP: ${ip}${country ? ` (${country})` : ' (country unknown)'}`);
 
         }
 
@@ -1148,9 +1167,6 @@ class RegistrationAssistant extends EventEmitter {
           this.smsController.signal.throwIfAborted();
 
           if (attempt) {
-
-
-
 
             const previous = this.page;
 
@@ -1228,7 +1244,7 @@ class RegistrationAssistant extends EventEmitter {
       const blocked = !this.exitIpReserved;
       if (this.state && !this.stopped) {
         const cancelled = options?.signal?.aborted || this.smsController?.signal.aborted;
-        const code = cancelled ? 'CANCELLED_BY_USER' : ['IP_REUSED', 'IP_UNVERIFIED', 'PHONE_REUSED'].includes(error?.code) ? error.code : 'STARTUP_FAILED';
+        const code = cancelled ? 'CANCELLED_BY_USER' : ['IP_REUSED', 'IP_UNVERIFIED', 'IP_NOT_GERMAN', 'PHONE_REUSED'].includes(error?.code) ? error.code : 'STARTUP_FAILED';
         this.recordFailure(code, error, { phase: code.startsWith('IP_') ? 'proxy_check' : this.state.phase, status: cancelled ? 'cancelled' : blocked ? 'failed' : 'needs_attention' });
       }
 
@@ -1304,8 +1320,6 @@ class RegistrationAssistant extends EventEmitter {
 
       this.store.reservePhone(details, id);
 
-      // Keep known returned numbers in history even if the provider's
-      // activation metadata is invalid. An unsuccessful attempt still owns it.
       this.store.update(id, { ...details, heroSMS: null });
 
       if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(number?.activationId || ''))) throw new Error('HeroSMS returned an invalid activation ID. The returned phone number remains reserved.');
@@ -1324,7 +1338,7 @@ class RegistrationAssistant extends EventEmitter {
 
       this.smsPoll = { activationId: heroSMS.activationId, deadline: null, nextAt: 0, finished: false, retryable: false, providerStatus: null };
 
-      this.addLog(this.phoneLease ? `SMS number saved · use ${this.phoneLease.uses}/3 · expires at ${new Date(this.phoneLease.expiresAt).toISOString()}.` : 'SMS number saved. Continuing with the phone form.');
+      this.addLog(this.phoneLease ? `SMS number saved · use ${this.phoneLease.uses}/${MAX_PHONE_USES} · expires at ${new Date(this.phoneLease.expiresAt).toISOString()}.` : 'SMS number saved. Continuing with the phone form.');
 
       return true;
 
@@ -1510,7 +1524,6 @@ class RegistrationAssistant extends EventEmitter {
       if (visible) this.lastVisibleError = { phase, message: visible, time: Date.now() };
       const reason = `GMX redirected to registration help. ${visible ? `Visible GMX error: ${visible}` : 'No specific rejection message could be read from GMX.'}${issue ? ` Last observed GMX request: ${issue.method} ${issue.code}.` : ''} Attempt stopped for review.`;
       this.recordFailure('GMX_REGISTRATION_HELP', reason, { phase });
-      // This may run inside tick(); waiting for this.work here would deadlock.
       await this.releaseBrowser();
     })();
     return this.helpFailure;
@@ -1542,8 +1555,6 @@ class RegistrationAssistant extends EventEmitter {
           for (const button of buttons) {
             if (!await button.evaluate(el => !el.disabled && !el.matches(':disabled') && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-busy') !== 'true')) continue;
             if (this.stopped || this.smsPoll !== poll || this.pendingCode || this.otpReady || this.smsController?.signal.aborted) return;
-            // Mark before clicking: a lost response must never replay an SMS
-            // request. The number and HeroSMS activation remain unchanged.
             this.smsResendAttempted = true;
             await button.click();
             if (this.stopped || this.smsPoll !== poll || this.pendingCode || this.otpReady) return;
@@ -1827,8 +1838,6 @@ class RegistrationAssistant extends EventEmitter {
       this.smsController?.abort();
 
       this.smsController = new AbortController();
-
-
 
       this.smsPoll = { ...this.smsPoll, deadline: null, nextAt: 0, finished: false, retryable: false, providerStatus: null };
 

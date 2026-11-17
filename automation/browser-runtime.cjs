@@ -1,13 +1,32 @@
 const puppeteer = require('puppeteer');
 const { addExtra } = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const UserPreferencesPlugin = require('puppeteer-extra-plugin-user-preferences');
 
-function launchRegistrationBrowser(options) {
-  // Plugins keep launch/profile state. Give each browser its own instances so
-  // disconnecting one worker cannot clean up another worker's profile.
+const preferences = {
+  credentials_enable_service: false,
+  credentials_enable_autosignin: false,
+  autofill: { profile_enabled: false, credit_card_enabled: false },
+  webrtc: { ip_handling_policy: 'disable_non_proxied_udp' },
+  profile: {
+    default_content_setting_values: {
+      geolocation: 2,
+      media_stream_camera: 2,
+      media_stream_mic: 2,
+      notifications: 2,
+    },
+  },
+};
+
+function launchRegistrationBrowser(options = {}) {
   const driver = addExtra(puppeteer);
   driver.use(StealthPlugin());
-  return driver.launch(options);
+  driver.use(UserPreferencesPlugin({ userPrefs: preferences }));
+  const pipe = options.pipe !== undefined ? options.pipe : true;
+  const ignoreDefaultArgs = options.ignoreDefaultArgs === true
+    ? true
+    : Array.from(new Set([...(options.ignoreDefaultArgs || []), '--enable-automation']));
+  return driver.launch({ ...options, pipe, ignoreDefaultArgs });
 }
 
 function describeBrowserLaunch(browser) {
@@ -19,8 +38,6 @@ function describeBrowserLaunch(browser) {
     const name = arg.split('=', 1)[0];
     counts.set(name, (counts.get(name) || 0) + 1);
   }
-  // Never include argument values: proxy credentials, URLs and profile paths
-  // can contain secrets or private information.
   return {
     available,
     switches: [...counts.keys()],

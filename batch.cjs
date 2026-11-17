@@ -86,7 +86,7 @@ class BatchRunner extends EventEmitter {
             proxyUrl = this.makeMaskifyProxy(this.maskifyEnv).url;
             hide = createRedactor([account.email, account.password, proxyUrl, this.apiKey,
               this.maskifyEnv.MASKIFY_USERNAME, this.maskifyEnv.MASKIFY_PASSWORD]);
-            log('Using a German Maskify session for this account.');
+            log('Maskify session requested for this account (country=DE; exit country not verified).');
           }
           const result = await this.automate({ ...account, proxyUrl, apiKey: this.apiKey, headless: run.headless,
             signal: controller.signal, closeDelayMs: 0, screenshotPath: filename, onLog: log,

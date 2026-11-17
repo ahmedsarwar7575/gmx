@@ -203,6 +203,11 @@ its effect and any IP disclosure require a runtime check. The browser has no
 configured direct fallback when the proxy fails. Exit-IP verification and
 permanent uniqueness reservations still run before visiting GMX.
 
+Maskify credentials request Germany (`DE`), but the IP check returns only an
+address. It does not verify country, ASN, or provider routing. Logs distinguish
+the requested country from an observed exit country; a successful IP check does
+not establish that the exit is in Germany.
+
 Diagnostic logs report launch switch names without their values, plus bounded,
 read-only fingerprint observations at startup and after registration/mailbox
 document loads. `webdriverType` distinguishes an absent value from `false`;
