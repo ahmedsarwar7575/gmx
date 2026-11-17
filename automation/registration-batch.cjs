@@ -86,7 +86,7 @@ class RegistrationBatchRunner extends EventEmitter {
       const profile = await this.makeProfile();
       signal.throwIfAborted();
       if (run.blocked) { job.status = 'cancelled'; job.stage = 'Not started · GMX registration help requires review'; return; }
-      worker = this.assistant.createWorker();
+      worker = this.assistant.createWorker({ logLabel: `Batch ${run.id.slice(0, 8)} Account ${job.index}` });
       this.workers.set(job.id, worker);
       update = snapshot => {
         const session = snapshot.active;
@@ -118,8 +118,17 @@ class RegistrationBatchRunner extends EventEmitter {
       job.stage = this.controller.signal.aborted ? 'Stopped by user' : timeout.signal.aborted
         ? 'Registration timed out. The account was not retried.' : worker?.state?.failureCode === 'GMX_REGISTRATION_HELP'
           ? worker.state.stage : worker?.safeError(error) || 'Could not prepare the registration profile.';
+      job.failureCode = this.controller.signal.aborted ? 'CANCELLED_BY_USER' : timeout.signal.aborted ? 'REGISTRATION_TIMEOUT'
+        : worker?.state?.failureCode || (worker ? 'REGISTRATION_FAILED' : 'PROFILE_GENERATION_FAILED');
+      job.failurePhase = worker?.state?.failurePhase || worker?.state?.phase || 'profile';
       if (worker?.activeId && worker.state?.status !== 'complete') {
-        try { worker.setState(job.status, job.stage); } catch {}
+        try {
+          if (worker.state.status === 'failed' && job.status === 'failed' && worker.state.failureCode) job.stage = worker.state.stage;
+          else if (worker.recordFailure) { worker.recordFailure(job.failureCode, job.stage, { phase: job.failurePhase, status: job.status }); job.stage = worker.state.stage; }
+          else worker.setState(job.status, job.stage);
+        } catch {}
+      } else if (!worker) {
+        console.error(`[Batch ${run.id.slice(0, 8)} Account ${job.index}] [${job.status.toUpperCase()}] Stopped at ${job.failurePhase} step (${job.failureCode}): ${job.stage}`);
       }
       // A stop can race with the site's final success marker. Keep confirmed
       // successes in the result and export even when stopping the other jobs.

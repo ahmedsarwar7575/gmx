@@ -715,7 +715,7 @@ class RegistrationAssistant extends EventEmitter {
 
     maskifyEnv = null, solverFactory = createCaptchaSolver, proxyIpCheck = checkProxyIp, purchasePhone = null,
 
-    smsClient = getSMS, smsPollMs = 5_000, smsTimeoutMs = 360_000, store = null } = {}) {
+    smsClient = getSMS, smsPollMs = 5_000, smsTimeoutMs = 360_000, store = null, logLabel = '' } = {}) {
 
     super();
 
@@ -723,14 +723,14 @@ class RegistrationAssistant extends EventEmitter {
     this.store = store || new RegistrationStore(directory);
     if (this.ownsStore) this.store.markInterrupted();
 
-    Object.assign(this, { launch, pollMs, transitionMs, solver: null, maskifyEnv, solverFactory, proxyIpCheck, purchasePhone, smsClient, smsPollMs, smsTimeoutMs, browser: null, page: null, activeId: null, state: null, timer: null, work: null, stopped: true, logs: [] });
+    Object.assign(this, { launch, pollMs, transitionMs, solver: null, maskifyEnv, solverFactory, proxyIpCheck, purchasePhone, smsClient, smsPollMs, smsTimeoutMs, logLabel, browser: null, page: null, activeId: null, state: null, timer: null, work: null, stopped: true, logs: [] });
 
   }
 
-  createWorker() {
+  createWorker({ logLabel = '' } = {}) {
     return new RegistrationAssistant({ store: this.store, launch: this.launch, pollMs: this.pollMs, transitionMs: this.transitionMs,
       maskifyEnv: this.maskifyEnv, solverFactory: this.solverFactory, proxyIpCheck: this.proxyIpCheck,
-      purchasePhone: this.purchasePhone, smsClient: this.smsClient, smsPollMs: this.smsPollMs, smsTimeoutMs: this.smsTimeoutMs });
+      purchasePhone: this.purchasePhone, smsClient: this.smsClient, smsPollMs: this.smsPollMs, smsTimeoutMs: this.smsTimeoutMs, logLabel });
   }
 
   snapshot() { return { active: this.state ? { ...this.state, browserOpen: !!this.browser?.connected,
@@ -741,7 +741,14 @@ class RegistrationAssistant extends EventEmitter {
 
   publish() { this.emit('state', this.snapshot()); }
 
+  printLog(message) {
+    const label = this.logLabel || (this.activeId ? `Session ${this.activeId.slice(0, 8)}` : 'Assistant');
+    console.log(`[${label}] ${message}`);
+  }
+
   addLog(message) {
+
+    message = this.safeError(message).slice(0, 2000);
 
     this.logs.push({ time: Date.now(), message });
 
@@ -749,7 +756,7 @@ class RegistrationAssistant extends EventEmitter {
 
     this.publish();
 
-    console.log(`[Assistant] ${message}`);
+    this.printLog(message);
 
   }
 
@@ -758,6 +765,8 @@ class RegistrationAssistant extends EventEmitter {
   setState(status, stage, phase = this.state?.phase || 'profile') {
 
     if (this.stopped && (status === 'running' || status === 'needs_attention' || status.startsWith('awaiting_'))) return;
+
+    stage = this.safeError(stage).slice(0, 2000);
 
     if (status.startsWith('awaiting_')) this.unknownSince = null;
 
@@ -769,10 +778,35 @@ class RegistrationAssistant extends EventEmitter {
 
     this.store.update(this.activeId, { status, stage });
 
-    this.logs.push({ time: Date.now(), message: stage }); this.logs = this.logs.slice(-40); this.publish();
+    const message = ['failed', 'cancelled', 'paused', 'needs_attention'].includes(status) ? `[${status.toUpperCase()}] ${stage}` : stage;
+    this.logs.push({ time: Date.now(), message }); this.logs = this.logs.slice(-40); this.publish();
 
-    console.log(`[Assistant] ${stage}`);
+    this.printLog(message);
 
+  }
+
+  recordFailure(code, reason, { phase = this.state?.phase || 'startup', status = 'failed' } = {}) {
+    this.state = { ...this.state, failureCode: code, failurePhase: phase };
+    this.store.update(this.activeId, { failureCode: code, failurePhase: phase });
+    const action = status === 'needs_attention' ? 'Needs attention' : status === 'cancelled' ? 'Cancelled' : 'Stopped';
+    this.setState(status, `${action} at ${phase.replace(/_/g, ' ')} step (${code}): ${this.safeError(reason)}`);
+  }
+
+  recordRequestIssue(request, { httpStatus, errorCode } = {}) {
+    if (this.stopped || !this.state || terminal.has(this.state.status)) return false;
+    let url;
+    try { url = new URL(request.url()); } catch { return false; }
+    if (url.origin !== 'https://register.gmx.net' || !['document', 'xhr', 'fetch'].includes(request.resourceType())) return false;
+    const code = Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus <= 599 ? `HTTP_${httpStatus}`
+      : /^ERR_[A-Z_]{1,70}$/.test(errorCode || '') ? errorCode : null;
+    if (!code) return false;
+    const method = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(request.method()) ? request.method() : 'REQUEST';
+    const phase = this.state.phase || 'unknown', previous = this.lastRequestIssue;
+    this.lastRequestIssue = { code, method, phase, time: Date.now() };
+    if (!previous || previous.code !== code || previous.method !== method || previous.phase !== phase || Date.now() - previous.time > 30_000) {
+      this.addLog(`Observed GMX ${method} request failure: ${code} during ${phase} step.`);
+    }
+    return true;
   }
 
   safeError(error) {
@@ -781,9 +815,11 @@ class RegistrationAssistant extends EventEmitter {
 
     const record = this.activeId && this.store.get(this.activeId);
 
-    for (const value of [record?.password, record?.phone, record?.heroSMS?.activationId, ...(this.redactions || [])]) if (value) text = text.split(value).join('[hidden]');
+    for (const value of [record?.password, record?.phone, record?.heroSMS?.activationId, this.maskifyEnv?.ANYSOLVER_API_KEY, this.maskifyEnv?.HEROSMS_API_KEY, ...(this.redactions || [])]) if (value) text = text.split(value).join('[hidden]');
 
     return text.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email hidden]')
+
+      .replace(/\b(sid|session|token|activationId|api_key|password)\s*[=:]\s*["']?[^\s"'&<>]+/gi, '$1=[hidden]')
 
       .replace(/https?:\/\/[^\s"'<>]+/g, value => { try { return new URL(value).origin; } catch { return '[URL hidden]'; } });
 
@@ -808,7 +844,7 @@ class RegistrationAssistant extends EventEmitter {
 
         phoneApproved: !!profile.phone, phonePurchaseStatus: profile.phone ? 'provided' : 'idle', failures: 0, unknownSince: null, manualCaptcha: null, stopped: false,
 
-        smsController: new AbortController(), exitIpReserved: false, smsResendAttempted: false,
+        smsController: new AbortController(), exitIpReserved: false, smsResendAttempted: false, lastRequestIssue: null, lastVisibleError: null,
 
         smsPoll: profile.heroSMS ? { activationId: profile.heroSMS.activationId, deadline: null, nextAt: 0, finished: false, retryable: false, providerStatus: null } : null,
 
@@ -846,7 +882,7 @@ class RegistrationAssistant extends EventEmitter {
 
         this.solver = this.solverFactory({ ...this.maskifyEnv, GMX_PROXY_URL: maskify.url }, {
 
-          log: message => console.log(`[SOLVER] ${message}`),
+          log: message => this.addLog(`Solver: ${message}`),
           signal: this.smsController.signal,
 
         });
@@ -957,13 +993,19 @@ class RegistrationAssistant extends EventEmitter {
           page.on('requestfailed', request => {
 
             const errorText = request.failure()?.errorText || '';
+            const code = errorText.match(/\bnet::(ERR_[A-Z_]+)/)?.[1];
+            const recorded = this.recordRequestIssue(request, { errorCode: code });
 
-            if (/ERR_(PROXY_CONNECTION_FAILED|TUNNEL_CONNECTION_FAILED|SOCKS_CONNECTION_FAILED|NO_SUPPORTED_PROXIES|PROXY_AUTH_UNSUPPORTED)/.test(errorText)) {
+            if (!recorded && /ERR_(PROXY_CONNECTION_FAILED|TUNNEL_CONNECTION_FAILED|SOCKS_CONNECTION_FAILED|NO_SUPPORTED_PROXIES|PROXY_AUTH_UNSUPPORTED)/.test(errorText)) {
 
-              console.error('[Browser Proxy Error]', errorText);
+              this.addLog(`Browser proxy request failed (${code || 'PROXY_ERROR'}).`);
 
             }
 
+          });
+
+          page.on('response', response => {
+            if (response.status() >= 400) this.recordRequestIssue(response.request(), { httpStatus: response.status() });
           });
 
           if (browserProxy && (browserProxy.username !== undefined || browserProxy.password !== undefined)) {
@@ -1107,7 +1149,10 @@ class RegistrationAssistant extends EventEmitter {
     } catch (error) {
 
       const blocked = !this.exitIpReserved;
-      if (this.state) this.setState(blocked ? 'failed' : 'needs_attention', this.safeError(error));
+      if (this.state && !this.stopped) {
+        const code = ['IP_REUSED', 'IP_UNVERIFIED', 'PHONE_REUSED'].includes(error?.code) ? error.code : 'STARTUP_FAILED';
+        this.recordFailure(code, error, { phase: code.startsWith('IP_') ? 'proxy_check' : this.state.phase, status: blocked ? 'failed' : 'needs_attention' });
+      }
 
       if (blocked || this.stopped) await this.closeBrowser();
 
@@ -1341,9 +1386,11 @@ class RegistrationAssistant extends EventEmitter {
 
   async failRegistrationHelp() {
     if (!this.state || terminal.has(this.state.status)) return;
-    this.state = { ...this.state, failureCode: 'GMX_REGISTRATION_HELP' };
-    this.store.update(this.activeId, { failureCode: 'GMX_REGISTRATION_HELP' });
-    this.setState('failed', 'GMX redirected to registration help · attempt stopped for review');
+    const phase = this.submitted?.phase || this.state.phase || 'unknown';
+    const visible = this.lastVisibleError?.phase === phase && Date.now() - this.lastVisibleError.time <= 30_000 ? this.lastVisibleError.message : null;
+    const issue = this.lastRequestIssue?.phase === phase && Date.now() - this.lastRequestIssue.time <= 30_000 ? this.lastRequestIssue : null;
+    const reason = `GMX redirected to registration help. ${visible ? `Last visible GMX error: ${visible}` : 'GMX did not provide a specific rejection reason.'}${issue ? ` Last observed GMX request: ${issue.method} ${issue.code}.` : ''} Attempt stopped for review.`;
+    this.recordFailure('GMX_REGISTRATION_HELP', reason, { phase });
     this.stopped = true; clearTimeout(this.timer); this.timer = null;
     this.smsController?.abort(new Error('GMX redirected to registration help.'));
     // This may run inside tick(); waiting for this.work here would deadlock.
@@ -1354,7 +1401,7 @@ class RegistrationAssistant extends EventEmitter {
     const mailboxUrl = view.page?.url();
     if (!view.mailboxRedirect || !isMailboxUrl(mailboxUrl)) throw new Error('A verified GMX Navigator mailbox redirect is required before marking success.');
     const email = /@gmx\.de$/i.test(view.email || '') ? view.email : null;
-    const verification = { completionSource: 'mailbox_redirect', completionOrigin: new URL(mailboxUrl).origin };
+    const verification = { completionSource: 'mailbox_redirect', completionOrigin: new URL(mailboxUrl).origin, failureCode: null, failurePhase: null };
     this.store.update(this.activeId, { completedAt: Date.now(), ...verification, ...(email ? { email } : {}) });
     this.state = { ...this.state, ...verification };
     if (email) this.state = { ...this.state, emailHint: emailHint(email) };
@@ -1511,6 +1558,8 @@ class RegistrationAssistant extends EventEmitter {
 
     this.page = view.page;
 
+    if (view.errors?.length) this.lastVisibleError = { phase: view.phase, message: this.safeError(view.errors[0]).slice(0, 600), time: Date.now() };
+
     if (view.email) {
 
       const record = this.store.get(this.activeId);
@@ -1596,7 +1645,7 @@ class RegistrationAssistant extends EventEmitter {
 
       this.prepared = view.key; this.failures = 0;
 
-      if (result === 'navigating') { this.submitted = { key: view.key, at: Date.now() }; return; }
+      if (result === 'navigating') { this.submitted = { key: view.key, phase: view.phase, at: Date.now() }; return; }
 
     }
 
@@ -1616,7 +1665,7 @@ class RegistrationAssistant extends EventEmitter {
 
     if (fresh.nextDisabled) return this.waitUnknown('Waiting for GMX to enable Continue');
 
-    this.submitted = { key: view.key, at: Date.now() }; this.unknownSince = null;
+    this.submitted = { key: view.key, phase: view.phase, at: Date.now() }; this.unknownSince = null;
 
     this.setState('running', `Submitting GMX ${view.phase} step`, view.phase);
 

@@ -85,6 +85,15 @@ already running accounts may finish. No replacement profile or automatic retry
 is created in response to that redirect. Review the failure before starting a
 new batch. Reserved phone numbers and exit IPs remain reserved.
 
+Registration logs identify the batch and account number, so parallel workers can
+be distinguished. Failed attempts include the step, a failure code and a stop
+reason. Recent HTTP/network failures and visible GMX validation errors are
+included when observed. A help redirect without a specific GMX message is
+explicitly reported as an unknown rejection reason. Request bodies, raw response
+bodies, session URL queries and known credentials are not logged. Ordinary failed
+attempts release their worker for the next already queued account; no replacement
+profiles are created after GMX redirects to registration help.
+
 If the HeroSMS code wait expires, the assistant clicks GMX's enabled
 `resend-code-button` once and resumes checking the same activation and number.
 There is at most one automatic resend per account. Disabled, missing or
