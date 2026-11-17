@@ -1015,14 +1015,7 @@ class RegistrationAssistant extends EventEmitter {
         return installed.get(page);
 
       };
-const fp = await page.evaluate(() => ({
-  ua: navigator.userAgent,
-  platform: navigator.platform,
-  languages: navigator.languages,
-  webdriver: navigator.webdriver,
-  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-}));
-console.log(fp);
+
       this.browser.on('targetcreated', async target => {
 
         if (target.type() !== 'page') return;
@@ -1038,6 +1031,21 @@ console.log(fp);
       this.page = (await this.browser.pages())[0] || await this.browser.newPage();
 
       await install(this.page);
+         try {
+        const fp = await this.page.evaluate(() => ({
+          ua: navigator.userAgent,
+          platform: navigator.platform,
+          languages: navigator.languages,
+          webdriver: navigator.webdriver,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          hardwareConcurrency: navigator.hardwareConcurrency,
+          deviceMemory: navigator.deviceMemory ?? null,
+        }));
+        this.addLog(`Fingerprint: ${JSON.stringify(fp)}`);
+        if (fp.webdriver) this.addLog('[WARN] navigator.webdriver is still truthy — stealth evasion may have failed.');
+      } catch (error) {
+        this.addLog(`Fingerprint audit failed: ${this.safeError(error)}`);
+      }
 
       if (proxyArg) {
 
