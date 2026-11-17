@@ -10,7 +10,6 @@ const captchaNotice = document.getElementById("registration-captcha");
 const inspectBtn = document.getElementById("registration-inspect");
 const phoneForm = document.getElementById("registration-phone-form");
 const otpForm = document.getElementById("registration-otp-form");
-const completeBtn = document.getElementById("registration-complete");
 const closeBtn = document.getElementById("registration-close");
 const recordList = document.getElementById("registration-record-list");
 const recordCount = document.getElementById("record-count");
@@ -173,12 +172,6 @@ otpForm.addEventListener("submit", async (e) => {
   finally { btn.disabled = false; sph.hidden = true; }
 });
 
-completeBtn.addEventListener("click", async () => {
-  if (!activeId) return;
-  try { updateUI(await api(`/api/registration/${activeId}/complete`)); }
-  catch (err) { showToast(err.message); }
-});
-
 closeBtn.addEventListener("click", async () => {
   if (!activeId) return;
   try { updateUI(await api(`/api/registration/${activeId}/close`)); }
@@ -219,7 +212,7 @@ function updateUI(snapshot) {
   if (active) {
     activeId = active.id;
     badge.textContent = active.status.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
-    badge.className = "badge " + (active.status === "complete" || active.status === "user_confirmed" ? "success" : active.status === "needs_attention" ? "danger" : active.status.startsWith("awaiting") ? "warning" : "neutral");
+    badge.className = "badge " + (active.status === "complete" ? "success" : active.status === "needs_attention" ? "danger" : active.status.startsWith("awaiting") ? "warning" : "neutral");
     detail.textContent = active.stage || "Waiting...";
     
     captchaNotice.hidden = active.status !== "awaiting_captcha";
@@ -227,7 +220,6 @@ function updateUI(snapshot) {
     inspectBtn.textContent = active.smsRetryAvailable ? "Check SMS again" : "Retry current step";
     phoneForm.hidden = !active.browserOpen || active.status !== "awaiting_phone";
     otpForm.hidden = !active.browserOpen || active.status !== "awaiting_otp";
-    completeBtn.hidden = !active.browserOpen || !["running", "awaiting_captcha", "needs_attention"].includes(active.status);
     closeBtn.hidden = !active.browserOpen;
 
     if (active.logs) {
@@ -251,7 +243,6 @@ function updateUI(snapshot) {
     inspectBtn.hidden = true;
     phoneForm.hidden = true;
     otpForm.hidden = true;
-    completeBtn.hidden = true;
     closeBtn.hidden = true;
     logs.innerHTML = "";
   }
@@ -266,7 +257,7 @@ function updateUI(snapshot) {
     else if (phase === "phone" || phase === "otp") steps[3].classList.add("current");
     else if (phase === "unknown" && active.status === "awaiting_captcha") steps[1].classList.add("current");
     
-    if (active.status === "complete" || active.status === "user_confirmed") {
+    if (active.status === "complete") {
       steps.forEach(s => s.classList.add("done"));
     }
   } else {
@@ -354,7 +345,7 @@ function renderRecords() {
     checkbox.type = "checkbox"; checkbox.dataset.recordId = record.id;
     checkbox.checked = selectedRecords.has(record.id); checkbox.disabled = !record.eligible;
     checkbox.setAttribute("aria-label", `Select ${record.email || record.emailHint}`);
-    if (!record.eligible) checkbox.title = "Available after registration completes";
+    if (!record.eligible) checkbox.title = "Available after a verified BAP mailbox redirect";
     selection.append(checkbox);
     const email = tableNode("td", "record-email", record.email || record.emailHint || "—");
     const passwordCell = tableNode("td"), passwordWrap = tableNode("div", "record-password");

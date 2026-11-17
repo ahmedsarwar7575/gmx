@@ -4,7 +4,7 @@ const { parseProxies } = require('../inputs.cjs');
 const { createMaskifyProxy } = require('../maskify.cjs');
 const { generateProfile } = require('../random.js');
 
-const finished = new Set(['complete', 'user_confirmed', 'failed', 'paused', 'cancelled']);
+const finished = new Set(['complete', 'failed', 'paused', 'cancelled']);
 
 function batchInput({ connectionMode, accountCount, concurrency, proxyText } = {}) {
   if (!['maskify', 'proxy'].includes(connectionMode)) throw new Error('Choose Maskify API or HTTP proxy.');
@@ -53,7 +53,7 @@ class RegistrationBatchRunner extends EventEmitter {
     }).finally(() => {
       options.proxies.fill(''); options.proxies.length = 0;
       run.active = false; run.finishedAt = Date.now();
-      try { this.assistant.store.finishBatch(run.id, run.stopping ? 'stopped' : 'complete'); }
+      try { this.assistant.store.finishBatch(run.id, run.blocked ? 'blocked' : run.stopping ? 'stopped' : 'complete'); }
       catch { run.error = 'Could not save batch completion. Check database permissions and disk space.'; }
       this.publish();
     });
@@ -65,8 +65,8 @@ class RegistrationBatchRunner extends EventEmitter {
     const results = await Promise.allSettled(Array.from({ length: run.concurrency }, async () => {
       while (next < run.jobs.length) {
         const index = next++, job = run.jobs[index];
-        if (run.stopping) {
-          Object.assign(job, { status: 'cancelled', stage: 'Stopped before opening Chrome', finishedAt: Date.now() });
+        if (run.stopping || run.blocked) {
+          Object.assign(job, { status: 'cancelled', stage: run.blocked ? 'Not started · GMX registration help requires review' : 'Stopped before opening Chrome', finishedAt: Date.now() });
           this.publish(); continue;
         }
         await this.executeAccount(run, job, options.proxies[index]);
@@ -85,6 +85,7 @@ class RegistrationBatchRunner extends EventEmitter {
     try {
       const profile = await this.makeProfile();
       signal.throwIfAborted();
+      if (run.blocked) { job.status = 'cancelled'; job.stage = 'Not started · GMX registration help requires review'; return; }
       worker = this.assistant.createWorker();
       this.workers.set(job.id, worker);
       update = snapshot => {
@@ -96,7 +97,10 @@ class RegistrationBatchRunner extends EventEmitter {
         }
         job.session = session;
         job.stage = session.stage;
-        job.status = ['complete', 'user_confirmed'].includes(session.status) ? 'success'
+        if (session.failureCode === 'GMX_REGISTRATION_HELP') {
+          run.blocked = true; run.error = 'GMX opened registration help. New attempts stopped; review the failed registration.';
+        }
+        job.status = session.status === 'complete' ? 'success'
           : session.status === 'cancelled' ? 'cancelled' : ['failed', 'paused'].includes(session.status) ? 'failed' : session.status;
         this.publish();
       };
@@ -107,18 +111,19 @@ class RegistrationBatchRunner extends EventEmitter {
       // session inside each worker. A repeated exit IP always fails closed.
       await worker.start(profile, { mode: run.connectionMode, ...(proxyText ? { proxyText } : {}) });
       await this.waitForAccount(worker, signal);
-      if (!['complete', 'user_confirmed'].includes(worker.state?.status)) throw new Error('Registration did not complete.');
+      if (worker.state?.status !== 'complete') throw new Error(worker.state?.stage || 'Registration did not complete.');
       job.status = 'success'; job.stage = worker.state.stage || 'Account created';
     } catch (error) {
       job.status = this.controller.signal.aborted ? 'cancelled' : 'failed';
       job.stage = this.controller.signal.aborted ? 'Stopped by user' : timeout.signal.aborted
-        ? 'Registration timed out. The account was not retried.' : worker?.safeError(error) || 'Could not prepare the registration profile.';
-      if (worker?.activeId && !['complete', 'user_confirmed'].includes(worker.state?.status)) {
+        ? 'Registration timed out. The account was not retried.' : worker?.state?.failureCode === 'GMX_REGISTRATION_HELP'
+          ? worker.state.stage : worker?.safeError(error) || 'Could not prepare the registration profile.';
+      if (worker?.activeId && worker.state?.status !== 'complete') {
         try { worker.setState(job.status, job.stage); } catch {}
       }
       // A stop can race with the site's final success marker. Keep confirmed
       // successes in the result and export even when stopping the other jobs.
-      if (['complete', 'user_confirmed'].includes(worker?.state?.status)) { job.status = 'success'; job.stage = worker.state.stage || 'Account created'; }
+      if (worker?.state?.status === 'complete') { job.status = 'success'; job.stage = worker.state.stage || 'Account created'; }
     } finally {
       clearTimeout(deadline);
       if (worker) {

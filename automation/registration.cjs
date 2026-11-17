@@ -48,9 +48,21 @@ function emailHint(value) {
 function isMailboxUrl(value) {
   try {
     const url = new URL(value);
-    return ['https://gmx.net', 'https://www.gmx.net', 'https://bap.navigator.gmx.net'].includes(url.origin)
+    return url.origin === 'https://bap.navigator.gmx.net'
       && ['/mail', '/mail/'].includes(url.pathname);
   } catch { return false; }
+}
+
+function isRegistrationHelpUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.origin === 'https://hilfe.gmx.net' && url.pathname === '/kundenservice/flexreg.html';
+  } catch { return false; }
+}
+
+function isVerifiedRegistration(record) {
+  return record?.status === 'complete' && record.completionSource === 'mailbox_redirect'
+    && record.completionOrigin === 'https://bap.navigator.gmx.net';
 }
 
 
@@ -264,7 +276,7 @@ class RegistrationStore {
     const seen = new Set(), lines = [];
     for (const row of this.db.prepare('SELECT registration_id FROM registration_batch_accounts WHERE batch_id=? ORDER BY rowid').all(id)) {
       const record = this.get(row.registration_id);
-      if (!record || !['complete', 'user_confirmed'].includes(record.status) || !/^[^\s:@]+@gmx\.de$/i.test(record.email || '')
+      if (!isVerifiedRegistration(record) || !/^[^\s:@]+@gmx\.de$/i.test(record.email || '')
         || typeof record.password !== 'string' || !record.password || /[\r\n]/.test(record.password) || seen.has(record.email.toLowerCase())) continue;
       seen.add(record.email.toLowerCase());
       lines.push(`${record.email}:${record.password}`);
@@ -456,15 +468,17 @@ const dom = (() => {
       }).join(' ');
       const summaryEmails = [...new Set((visibleText.match(/[A-Z0-9._%+-]+@gmx\.de\b/gi) || []).map(value => value.toLowerCase()))];
       const finalHeading = all.some(el => visible(el) && el.matches('h1,h2,h3,[role="heading"]') && /^Perfekt\s*!?$/i.test(el.textContent.trim()));
-      // This is the user's accepted final screen, even when GMX reports a
-      // mailbox handoff error. Keep it distinct from verified completion.
-      const acceptedSummary = finalHeading && summaryEmails.length === 1 && /GMX\s*FreeMail/i.test(visibleText)
+      // Capture the chosen address on the final panel, then continue waiting
+      // for the actual mailbox redirect. A panel or OTP alone is insufficient.
+      const summaryPage = finalHeading && summaryEmails.length === 1 && /GMX\s*FreeMail/i.test(visibleText)
         && /E-Mail\s*:/i.test(visibleText) && /Cloud\s*:/i.test(visibleText) && /News\s*:/i.test(visibleText)
         && /Vertragszusammenfassung|Zustimmen\s+und\s+weiter/i.test(visibleText);
-      if (acceptedSummary) email = summaryEmails[0];
-      const success = successMarker || acceptedSummary;
+      if (summaryPage) email = summaryEmails[0];
 
       const errors = all.filter(el => visible(el) && (el.matches('[role="alert"],[id$="-error"]'))).map(el => el.textContent.trim()).filter(Boolean);
+      if (summaryPage && !errors.length && /da ist etwas schiefgelaufen|logge dich bitte über die homepage ein/i.test(visibleText)) {
+        errors.push('GMX reported an error opening the mailbox.');
+      }
 
       return { documentId: performance.timeOrigin, fields, captcha: !!modal || !!widget && !solved, modal,
 
@@ -472,7 +486,7 @@ const dom = (() => {
 
         wrongDomain: !!email && !/@gmx\.de$/i.test(email), aliasAvailable: !!alias?.classList.contains('alias-step__form-element--available'),
 
-        success, acceptedSummary: acceptedSummary && !successMarker, errors, next: !!next, nextDisabled: !next || next.disabled || next.getAttribute('aria-busy') === 'true',
+        success: false, summaryPage: summaryPage || successMarker, errors, next: !!next, nextDisabled: !next || next.disabled || next.getAttribute('aria-busy') === 'true',
 
         suggestionCount: all.filter(el => el.matches('button.chip[data-testid^="chip-"]') && visible(el)).length,
 
@@ -489,6 +503,8 @@ const dom = (() => {
     const ids = view.fields.map(field => field.id);
 
     if (ids.some(id => /^confirmationCode\.\d+\.digit$/.test(id)) || ids.includes('verificationCode')) return 'otp';
+
+    if (view.summaryPage) return 'confirmation';
 
     if (ids.includes('firstName')) return 'profile';
 
@@ -513,6 +529,8 @@ const dom = (() => {
     let candidate;
 
     const pages = (await browser.pages()).reverse();
+    const help = pages.find(page => isRegistrationHelpUrl(page.url()));
+    if (help) return { registrationHelp: true, page: help, phase: 'unknown' };
     // Only a top-level GMX mailbox navigation confirms success. Embedded URLs
     // and URLs merely mentioning GMX must not complete a registration.
     const mailbox = pages.find(page => isMailboxUrl(page.url()));
@@ -780,6 +798,8 @@ class RegistrationAssistant extends EventEmitter {
 
     try {
 
+      if (this.browserCleanup) await this.browserCleanup;
+
       const id = this.store.create({ ...profile, email: null, candidateEmail: profile.requestedEmail || emailCandidate(profile.firstName, profile.lastName) });
 
       Object.assign(this, { activeId: id, logs: [], redactions: new Set(), currentKey: null, attentionKey: null, prepared: null, submitted: null, pendingCode: null, otpReady: false,
@@ -916,6 +936,12 @@ class RegistrationAssistant extends EventEmitter {
 
           page.setDefaultTimeout(30_000);
 
+          page.on('framenavigated', frame => {
+            if (frame === page.mainFrame() && isRegistrationHelpUrl(frame.url())) {
+              void this.failRegistrationHelp().catch(() => {});
+            }
+          });
+
           await page.setExtraHTTPHeaders({ 'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8' });
 
           if (typeof page.createCDPSession === 'function') {
@@ -1030,7 +1056,11 @@ class RegistrationAssistant extends EventEmitter {
           while (true) {
 
             const initial = await dom.scan(this.browser);
-            if (initial?.success || initial?.phase === 'profile') break;
+            if (initial?.registrationHelp) {
+              await this.failRegistrationHelp();
+              throw new Error('GMX redirected to registration help. The attempt was stopped.');
+            }
+            if (initial?.success || initial?.phase === 'profile' || initial?.summaryPage) break;
 
             if (this.stopped) throw new Error('Registration was closed.');
 
@@ -1307,15 +1337,25 @@ class RegistrationAssistant extends EventEmitter {
 
 
 
+  async failRegistrationHelp() {
+    if (!this.state || terminal.has(this.state.status)) return;
+    this.state = { ...this.state, failureCode: 'GMX_REGISTRATION_HELP' };
+    this.store.update(this.activeId, { failureCode: 'GMX_REGISTRATION_HELP' });
+    this.setState('failed', 'GMX redirected to registration help · attempt stopped for review');
+    this.stopped = true; clearTimeout(this.timer); this.timer = null;
+    this.smsController?.abort(new Error('GMX redirected to registration help.'));
+    // This may run inside tick(); waiting for this.work here would deadlock.
+    await this.releaseBrowser();
+  }
+
   finishRegistration(view) {
-    const source = view.mailboxRedirect ? 'mailbox_redirect' : view.acceptedSummary ? 'accepted_summary' : 'success_marker';
+    if (!view.mailboxRedirect || !isMailboxUrl(view.page?.url())) throw new Error('A verified BAP mailbox redirect is required before marking success.');
     const email = /@gmx\.de$/i.test(view.email || '') ? view.email : null;
-    this.store.update(this.activeId, { completedAt: Date.now(), completionSource: source, ...(email ? { email } : {}) });
+    const verification = { completionSource: 'mailbox_redirect', completionOrigin: 'https://bap.navigator.gmx.net' };
+    this.store.update(this.activeId, { completedAt: Date.now(), ...verification, ...(email ? { email } : {}) });
+    this.state = { ...this.state, ...verification };
     if (email) this.state = { ...this.state, emailHint: emailHint(email) };
-    this.setState(view.acceptedSummary ? 'user_confirmed' : 'complete', view.mailboxRedirect
-      ? 'GMX opened the mailbox · account creation complete' : view.acceptedSummary
-        ? 'Accepted final registration screen reached · mailbox access unverified'
-        : 'GMX confirmed successful account creation', 'confirmation');
+    this.setState('complete', 'Verified BAP mailbox redirect · account creation complete', 'confirmation');
   }
 
   async handleSmsTimeout(poll) {
@@ -1326,6 +1366,7 @@ class RegistrationAssistant extends EventEmitter {
       try {
         const view = await dom.scan(this.browser);
         if (this.stopped || this.smsPoll !== poll || this.pendingCode || this.otpReady) return;
+        if (view?.registrationHelp) { await this.failRegistrationHelp(); return; }
         if (view?.success) { this.finishRegistration(view); return; }
         if (view?.phase === 'otp' && !view.captcha) {
           buttons = await dom.nodes(view.frame, 'button[data-testid="resend-code-button"]');
@@ -1461,6 +1502,8 @@ class RegistrationAssistant extends EventEmitter {
 
     if (!view) return this.waitUnknown('Waiting for the GMX registration page');
 
+    if (view.registrationHelp) { await this.failRegistrationHelp(); return; }
+
     if (!view.captcha) this.manualCaptcha = null;
 
     this.page = view.page;
@@ -1474,6 +1517,11 @@ class RegistrationAssistant extends EventEmitter {
     }
 
     if (view.success) { this.finishRegistration(view); return; }
+
+    if (view.summaryPage) {
+      if (view.errors.length) { this.setState('needs_attention', `GMX needs attention: ${this.safeError(view.errors[0])} · waiting for the BAP mailbox redirect`, 'confirmation'); return; }
+      if (!view.next) { this.setState('running', 'Waiting for the verified BAP mailbox redirect', 'confirmation'); return; }
+    }
 
     if (view.key !== this.currentKey) {
 
@@ -1639,8 +1687,6 @@ class RegistrationAssistant extends EventEmitter {
 
   }
 
-  markComplete(id) { if (this.activeId !== id) throw new Error('Registration session not found.'); this.setState('user_confirmed', 'Account creation confirmed manually by you', 'confirmation'); return this.snapshot(); }
-
   reveal(id) { const record = this.store.get(id); if (!record) throw new Error('Registration record not found.'); return { email: record.email || record.candidateEmail, password: record.password }; }
 
   tableRecords() {
@@ -1655,9 +1701,9 @@ class RegistrationAssistant extends EventEmitter {
 
         street: record.street, postalCode: record.postalCode, city: record.city, country: record.country,
 
-        status: record.status, createdAt: record.created_at, updatedAt: record.updated_at,
+        status: ['complete', 'user_confirmed'].includes(record.status) && !isVerifiedRegistration(record) ? 'unverified' : record.status, createdAt: record.created_at, updatedAt: record.updated_at,
 
-        eligible: ['complete', 'user_confirmed'].includes(record.status) && !!record.email };
+        eligible: isVerifiedRegistration(record) && !!record.email };
 
     });
 
@@ -1675,9 +1721,9 @@ class RegistrationAssistant extends EventEmitter {
 
       const record = this.store.get(id);
 
-      if (!record || !['complete', 'user_confirmed'].includes(record.status) || !/^[^\s@]+@gmx\.de$/i.test(record.email || '') || !record.password) {
+      if (!isVerifiedRegistration(record) || !/^[^\s@]+@gmx\.de$/i.test(record.email || '') || !record.password) {
 
-        throw new Error('Only completed registrations with a saved GMX email and password can run IMAP / POP3.');
+        throw new Error('Only registrations with a verified BAP mailbox redirect and saved GMX credentials can run IMAP / POP3.');
 
       }
 
@@ -1697,11 +1743,23 @@ class RegistrationAssistant extends EventEmitter {
 
     this.smsPoll = null;
 
+    await this.releaseBrowser();
+
+  }
+
+  async releaseBrowser() {
+
+    if (this.browserCleanup) return this.browserCleanup;
+
     const browser = this.browser; this.browser = null; this.page = null; this.pendingCode = null;
 
-    await browser?.close().catch(() => {});
-
-    await this.solver?.closeProxy().catch(() => {});
+    const solver = this.solver;
+    const cleanup = this.browserCleanup = (async () => {
+      await browser?.close().catch(() => {});
+      await solver?.closeProxy().catch(() => {});
+    })();
+    try { await cleanup; }
+    finally { if (this.browserCleanup === cleanup) this.browserCleanup = null; }
 
   }
 
@@ -1813,17 +1871,6 @@ function createRegistrationRouter(registrationAssistant = null, { generateProfil
 
   });
 
-  router.post("/:id/complete", (req, res) => {
-
-    const assistant = sessionFor(req.params.id);
-    if (!assistant) return res.status(404).json({ error: "Registration session not found." });
-
-    try { assistant.markComplete(req.params.id); res.json(snapshot()); }
-
-    catch (error) { res.status(400).json({ error: error.message }); }
-
-  });
-
   router.post("/:id/credentials", (req, res) => {
 
     if (!registrationAssistant) return res.status(503).json({ error: "Registration assistance is unavailable in this server instance." });
@@ -1839,7 +1886,7 @@ function createRegistrationRouter(registrationAssistant = null, { generateProfil
     const assistant = sessionFor(req.params.id);
     if (!assistant) return res.status(404).json({ error: "Registration session not found." });
     await assistant.closeBrowser();
-    if (!["complete", "user_confirmed"].includes(assistant.state?.status)) assistant.setState("paused", "Browser closed · encrypted profile saved");
+    if (!["complete", "failed", "cancelled"].includes(assistant.state?.status)) assistant.setState("paused", "Browser closed · encrypted profile saved");
     res.json(snapshot());
 
   });

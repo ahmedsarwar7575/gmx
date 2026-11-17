@@ -65,16 +65,23 @@ Mobile first, then Lycamobile only after an explicit stock or payment rejection.
 Uncertain purchase failures are not automatically retried. SMS reads reuse the
 same activation; manual phone and code entry remain available.
 
-Reaching `/mail` on `https://gmx.net`, `https://www.gmx.net`, or
-`https://bap.navigator.gmx.net` confirms registration success; changing query
-strings do not affect detection. Session IDs are not recorded in completion logs.
-The existing successful-registration marker remains supported.
+Only a top-level redirect to `https://bap.navigator.gmx.net/mail` (or `/mail/`)
+confirms registration success. Query strings may change; session IDs are not
+recorded in completion logs. OTP submission, **Perfekt!**, the old registration
+success marker and the generic `gmx.net/mail` page do not mark success or close
+the browser. The assistant keeps watching for the BAP mailbox redirect. Errors
+on the final screen keep the browser open with an attention message.
 
-The final **Perfekt!** screen with a GMX email, FreeMail benefits and contract
-summary also counts toward the batch's success total, as requested. That screen
-is saved as `user_confirmed` with completion source `accepted_summary`, including
-when GMX displays an error opening the mailbox. Its saved email and password are
-included in the TXT export; its stage says mailbox access is unverified.
+Manual completion is disabled. TXT exports and saved-account automation require
+a recorded BAP mailbox redirect. Older screenshot-based, manually confirmed or
+otherwise unverified records remain saved and are displayed as **unverified**;
+they are excluded from success exports and saved-account selection.
+
+If any tab reaches `https://hilfe.gmx.net/kundenservice/flexreg.html`, the attempt
+fails and its browser closes. The batch stops starting queued attempts, and
+already running accounts may finish. No replacement profile or automatic retry
+is created in response to that redirect. Review the failure before starting a
+new batch. Reserved phone numbers and exit IPs remain reserved.
 
 If the HeroSMS code wait expires, the assistant clicks GMX's enabled
 `resend-code-button` once and resumes checking the same activation and number.
