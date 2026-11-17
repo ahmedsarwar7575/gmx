@@ -958,14 +958,7 @@ class RegistrationAssistant extends EventEmitter {
 
       this.smsController.signal.throwIfAborted();
 
-const fp = await page.evaluate(() => ({
-  ua: navigator.userAgent,
-  platform: navigator.platform,
-  languages: navigator.languages,
-  webdriver: navigator.webdriver,
-  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-}));
-console.log(fp);
+
 
       const installed = new WeakMap();
 
@@ -1022,7 +1015,14 @@ console.log(fp);
         return installed.get(page);
 
       };
-
+const fp = await page.evaluate(() => ({
+  ua: navigator.userAgent,
+  platform: navigator.platform,
+  languages: navigator.languages,
+  webdriver: navigator.webdriver,
+  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+}));
+console.log(fp);
       this.browser.on('targetcreated', async target => {
 
         if (target.type() !== 'page') return;
