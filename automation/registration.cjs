@@ -943,24 +943,15 @@ class RegistrationAssistant extends EventEmitter {
         args: [
 
           '--start-maximized',
-
           '--lang=de-DE',
-
           '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
-
           '--dns-prefetch-disable',
-
           '--disable-background-networking',
-
           '--disable-quic',
           '--disable-blink-features=AutomationControlled',
-
           '--proxy-bypass-list=<-loopback>',
-
           ...(proxyArg ? [proxyArg] : []),
-
           ...(process.platform === 'linux' && process.env.DISPLAY ? ['--ozone-platform=x11'] : [])
-
         ]
 
       });
