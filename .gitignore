@@ -1,0 +1,65 @@
+# Dependencies and caches
+node_modules/
+.npm/
+.pnpm-store/
+.cache/
+.puppeteer/
+
+# Local credentials (keep the safe setup template)
+.env
+.env.*
+!.env.example
+.envrc
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Account storage, browser sessions and generated output
+/data/
+/artifacts/
+/browser-profiles/
+/uploads/
+/downloads/
+/exports/
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+accounts*.txt
+proxies*.txt
+proxy.txt
+credentials*.txt
+gmx-accounts-*.txt
+
+# Logs and temporary files
+*.log
+*.pid
+*.pid.lock
+/tmp/
+/temp/
+/coverage/
+.nyc_output/
+*.tmp
+*.swp
+*.swo
+*~
+
+# Backups and archives
+/backup/
+/backups/
+*.bak
+*.orig
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

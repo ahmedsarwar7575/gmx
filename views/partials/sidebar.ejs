@@ -1,0 +1,10 @@
+<aside class="sidebar">
+  <a class="brand" href="<%= page === 'overview' ? '#overview' : '/' %>" aria-label="Mailbox overview"><span class="brand-icon"><svg class="icon" aria-hidden="true"><use href="#i-mail"/></svg></span><span>mailbox</span></a>
+  <p class="nav-label">WORKSPACE</p>
+  <nav aria-label="Workspace">
+    <a class="nav-link<%= page === 'overview' ? ' active' : '' %>" href="<%= page === 'overview' ? '#overview' : '/' %>"<%- page === 'overview' ? ' aria-current="page"' : '' %>><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg><span>IMAP / POP3</span><% if (page === 'overview') { %><span id="nav-count" class="nav-count">0</span><% } %></a>
+    <a class="nav-link<%= page === 'registration' ? ' active' : '' %>" href="/registration"<%- page === 'registration' ? ' aria-current="page"' : '' %>><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg><span>Registration</span></a>
+  </nav>
+  <div class="sidebar-note"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><span>Private workspace</span></div>
+  <div class="connection"><span id="connection-dot" class="connection-dot"></span><strong id="connection-text">Connecting</strong></div>
+</aside>

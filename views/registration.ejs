@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="<%= csrf %>">
+  <title>Registration · GMX</title>
+  <link rel="icon" href="/public/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/public/app.css">
+  <script src="/public/registration.js" defer></script>
+</head>
+<body class="workspace-page registration-page">
+  <%- include('partials/icons') %>
+  <%- include('partials/sidebar', { page: 'registration' }) %>
+  <div class="main-shell">
+    <%- include('partials/topbar', { title: 'Registration' }) %>
+    <main class="registration-main">
+      <div class="page-heading"><div><h1>Registration</h1><p>Create and manage your GMX registrations.</p></div><span class="provider-tag"><svg class="icon" aria-hidden="true"><use href="#i-mail"/></svg>GMX</span></div>
+      <div class="registration-layout">
+        <section class="card registration-card">
+          <div class="card-heading"><span class="registration-section-label">NEW BATCH</span><h2>Create GMX accounts</h2><p>Choose your connection, account count and parallel workers.</p></div>
+          <div class="registration-benefits" aria-label="Included in registration"><span><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Generated profile</span><span><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>SMS verification</span><span><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Private storage</span></div>
+          <form id="registration-form" autocomplete="off">
+            <fieldset id="registration-connection" class="registration-connection">
+              <legend>Connection</legend>
+              <div class="connection-choices">
+                <label><input type="radio" name="connectionMode" value="maskify" checked><span>Maskify API</span></label>
+                <label><input type="radio" name="connectionMode" value="proxy"><span>HTTP proxy</span></label>
+              </div>
+              <p id="connection-help">Uses your configured Maskify connection.</p>
+              <label id="registration-proxy-field" class="registration-proxy-field" hidden>Proxy TXT<input id="registration-proxy-file" name="proxies" type="file" accept=".txt,text/plain" disabled><span>One proxy per line · Max 2 MB · host:port:user:password or HTTP/HTTPS URL. Supply at least one different proxy per account.</span></label>
+              <div class="registration-batch-inputs"><label>Accounts<input id="registration-account-count" name="accountCount" type="number" min="1" max="500" step="1" value="10" required></label><label>Parallel workers<input id="registration-workers" name="concurrency" type="number" min="1" max="8" step="1" value="2" required></label></div>
+              <p>Each account uses a verified, unused exit IP. Repeated or unverified IPs stop that attempt.</p>
+            </fieldset>
+            <div class="registration-actions"><button id="registration-start" class="button button-primary" type="submit"><span id="registration-spinner" class="spinner" hidden></span><span id="registration-start-label">Start batch</span><svg id="registration-arrow" class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button><span id="registration-message" role="status">One Chrome window per active worker.</span></div>
+            <p id="registration-error" class="form-error" role="alert" hidden></p>
+          </form>
+        </section>
+        <aside class="card registration-progress">
+          <div class="run-card-top"><h2>Registration progress</h2><span id="registration-badge" class="badge neutral">Ready</span></div>
+          <p id="registration-batch-status" class="registration-batch-status" role="status">No batch started.</p>
+          <div class="registration-batch-actions"><button type="button" id="registration-batch-stop" class="button button-stop" hidden>Stop batch</button><button type="button" id="registration-download" class="button button-secondary" hidden>Download email:password TXT</button></div>
+          <p id="registration-download-status" class="registration-batch-status" role="status" hidden></p>
+          <label id="registration-session-field" class="registration-session-field" hidden>Account session<select id="registration-session" aria-label="Choose account session"></select></label>
+          <div id="registration-detail" class="registration-detail" role="status" aria-live="polite">No active registration.</div>
+          <ol class="registration-steps" aria-label="Registration progress"><li class="current" id="step-profile"><span>1</span><strong>Profile</strong></li><li id="step-captcha"><span>2</span><strong>CAPTCHA</strong></li><li id="step-details"><span>3</span><strong>Details</strong></li><li id="step-phone"><span>4</span><strong>SMS</strong></li></ol>
+          <p id="registration-captcha" class="registration-captcha" role="status" hidden>Complete the CAPTCHA in Chrome to continue.</p>
+          <button type="button" class="button button-secondary registration-inspect" id="registration-inspect" hidden>Retry current step</button>
+          <form id="registration-phone-form" class="manual-verification-form" hidden autocomplete="off"><div class="registration-phone-fields"><label>Calling code<input name="countryCode" inputmode="tel" placeholder="+49" pattern="\+\d{1,4}" required></label><label>Mobile number<input name="phone" type="tel" autocomplete="off" placeholder="Without calling code" required></label></div><button type="submit" class="button button-primary" id="send-code-button"><span class="spinner" id="phone-spinner" hidden></span><span id="phone-button-label">Request SMS code</span></button><p>Send a verification code to this number.</p></form>
+          <form id="registration-otp-form" class="manual-verification-form" hidden autocomplete="off"><label>SMS code<input name="code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="Enter your code" pattern="\d{4,10}" maxlength="10" required></label><button type="submit" class="button button-primary" id="submit-code-button"><span class="spinner" id="otp-spinner" hidden></span><span id="otp-button-label">Verify code</span></button><p>Used once. Never stored.</p></form>
+          <div class="registration-session-actions"><button type="button" class="button button-secondary registration-complete" id="registration-complete" title="Use after GMX confirms account creation" hidden>Confirm completion</button><button type="button" class="button button-stop registration-close" id="registration-close" hidden>Close browser</button></div>
+          <details class="registration-activity"><summary>Activity<svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></summary><ul id="registration-logs" class="registration-logs" aria-label="Registration activity"></ul></details>
+        </aside>
+      </div>
+      <section class="card registration-records" aria-labelledby="records-title">
+        <div class="card-heading"><div class="results-title"><h2 id="records-title">Registrations</h2><span id="record-count" class="count-chip">0 saved</span></div><button type="button" class="button button-secondary" id="records-refresh">Refresh</button></div>
+        <form id="saved-batch-form" class="saved-batch-form">
+          <div class="saved-batch-selection"><strong id="selected-count">0 selected</strong><span>Completed accounts can run IMAP / POP3.</span></div>
+          <div class="saved-batch-controls"><label class="saved-proxy-field">Proxy TXT<input type="file" id="saved-proxies" name="proxies" accept=".txt,text/plain" required></label><label>Workers<input id="saved-workers" name="concurrency" type="number" min="1" max="8" value="2" required></label><label>Browser<select id="saved-browser" name="headless"><option value="false">Visible</option><option value="true">Headless</option></select></label><button type="submit" class="button button-primary" id="saved-batch-start" disabled>Run IMAP / POP3</button><button type="button" class="button button-stop" id="saved-batch-stop" hidden>Stop batch</button></div>
+          <p id="saved-batch-error" class="form-error" role="alert" hidden></p>
+          <div class="saved-batch-feedback"><span id="saved-batch-status" role="status"></span><a href="/#results" id="saved-batch-results" hidden>View results <span aria-hidden="true">↗</span></a></div>
+        </form>
+        <div id="registration-record-list" class="registration-record-list" role="region" aria-label="Saved registrations" tabindex="0"><table class="registration-table"><thead><tr><th scope="col"><input type="checkbox" id="select-all-records" aria-label="Select all completed registrations"></th><th scope="col">Email</th><th scope="col">Password</th><th scope="col">Name</th><th scope="col">Date of birth</th><th scope="col">Gender</th><th scope="col">Phone</th><th scope="col">Address</th><th scope="col">Status</th><th scope="col">Details</th></tr></thead><tbody id="registration-records-body"><tr><td colspan="10" class="registration-record-empty">No saved registrations.</td></tr></tbody></table></div>
+        <p id="records-error" class="form-error" role="alert" hidden></p>
+      </section>
+      <%- include('partials/footer') %>
+    </main>
+  </div>
+  <dialog id="registration-credentials" aria-labelledby="registration-credentials-title"><div class="modal-header"><h2 id="registration-credentials-title">Account details</h2><button type="button" class="icon-button" id="registration-credentials-close" aria-label="Close account details"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></div><div class="credential-content"><label>Email<input id="saved-email" readonly></label><label>Password<div class="password-reveal"><input id="saved-password" type="password" readonly><button type="button" id="toggle-password">Show</button></div></label></div></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>

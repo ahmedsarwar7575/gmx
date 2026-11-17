@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="<%= csrf %>">
+  <title>POP3 &amp; IMAP Manager · GMX</title>
+  <link rel="icon" href="/public/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/public/app.css">
+  <script src="/public/app.js" defer></script>
+</head>
+<body class="workspace-page overview-page">
+  <%- include('partials/icons') %>
+  <%- include('partials/sidebar', { page: 'overview' }) %>
+  <div class="main-shell">
+    <%- include('partials/topbar', { title: 'IMAP / POP3' }) %>
+    <main id="overview">
+      <div class="page-heading"><div><h1>IMAP / POP3</h1><p>Manage mail access for your GMX accounts.</p></div><span class="provider-tag"><svg class="icon" aria-hidden="true"><use href="#i-mail"/></svg>GMX</span></div>
+      <div class="metrics" aria-label="Batch statistics">
+        <div class="metric"><span class="metric-icon slate"><svg class="icon" aria-hidden="true"><use href="#i-mail"/></svg></span><div><span>Accounts</span><strong id="metric-total">0</strong></div></div>
+        <div class="metric"><span class="metric-icon blue"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg></span><div><span>Running</span><strong id="metric-running">0</strong></div></div>
+        <div class="metric"><span class="metric-icon teal"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg></span><div><span>Verified</span><strong id="metric-success">0</strong></div></div>
+        <div class="metric"><span class="metric-icon amber"><svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg></span><div><span>Attention</span><strong id="metric-attention">0</strong></div></div>
+      </div>
+      <div class="setup-grid">
+        <section class="card batch-card">
+          <div class="card-heading section-heading"><h2>New batch</h2><span class="section-note">TXT files</span></div>
+          <form id="batch-form">
+            <fieldset id="config-fields">
+              <div class="uploads">
+                <div><div class="field-title">Accounts</div><label class="dropzone" for="accounts"><input id="accounts" name="accounts" type="file" accept=".txt,text/plain" required><span class="upload-icon"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg></span><strong id="accounts-name">Upload accounts</strong><span id="accounts-detail">Drop TXT or <b>browse</b> · Max 2 MB</span></label><p class="field-help"><code>email:password</code></p></div>
+                <div><div class="field-title">Proxies</div><label class="dropzone" for="proxies"><input id="proxies" name="proxies" type="file" accept=".txt,text/plain" required><span class="upload-icon"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg></span><strong id="proxies-name">Upload proxies</strong><span id="proxies-detail">Drop TXT or <b>browse</b> · Max 2 MB</span></label><p class="field-help"><code>host:port:user:password</code> or proxy URL</p></div>
+              </div>
+              <div class="options">
+                <div><label class="field-title" for="concurrency">Workers</label><div class="stepper"><button type="button" id="decrement" aria-label="Fewer parallel tasks">−</button><input id="concurrency" name="concurrency" type="number" min="1" max="8" value="2" required><button type="button" id="increment" aria-label="More parallel tasks">+</button><span>parallel</span></div><p class="field-help">Up to 8. One proxy per worker.</p></div>
+                <div><div class="field-title" id="mode-label">Browser</div><div class="mode-toggle" role="group" aria-labelledby="mode-label"><label><input type="radio" name="headless" value="false" checked><span>Visible</span></label><label><input type="radio" name="headless" value="true"><span>Headless</span></label></div><p class="field-help">Visible mode supports manual verification.</p></div>
+              </div>
+            </fieldset>
+            <div class="form-footer"><span class="cleanup-note"><svg class="icon" aria-hidden="true"><use href="#i-image"/></svg>Previous screenshots will be cleared.</span><div class="form-buttons"><button type="button" class="button button-stop" id="stop-button" hidden>Stop batch</button><button type="submit" class="button button-primary" id="start-button" disabled><span id="start-spinner" class="spinner" hidden></span><span id="start-label">Start batch</span><svg id="start-arrow" class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button></div></div>
+            <p id="form-error" class="form-error" role="alert" hidden></p>
+          </form>
+        </section>
+        <aside class="card run-card">
+          <div class="run-card-top"><h2>Current batch</h2><span id="run-badge" class="badge neutral">Ready</span></div>
+          <div class="progress-heading"><strong id="progress-number">0<span>%</span></strong><span id="progress-detail">Ready to start</span></div>
+          <div class="progress-track"><div id="progress-fill"></div></div>
+          <div class="run-details"><div><span>Browser</span><strong id="summary-mode">Visible Chrome</strong></div><div><span>Workers</span><strong id="summary-workers">2</strong></div><div><span>Proxy</span><strong>One per worker</strong></div><div><span>Elapsed</span><strong id="summary-elapsed">—</strong></div></div>
+          <div class="verification-note"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><p>Verified after refreshing settings.</p></div>
+          <div id="solver-note" class="solver-note">Checking CAPTCHA configuration…</div>
+        </aside>
+      </div>
+      <section class="card results-card" id="results">
+        <div class="results-heading"><div class="results-title"><h2>Results</h2><span class="count-chip" id="result-count">0 accounts</span></div><div class="filters" role="group" aria-label="Filter results"><button type="button" class="selected" data-filter="all">All</button><button type="button" data-filter="success">Verified</button><button type="button" data-filter="attention">Attention</button></div></div>
+        <div class="table-scroll"><table><thead><tr><th scope="col">Account</th><th scope="col">Status</th><th scope="col">Current step</th><th scope="col">Duration</th><th scope="col">Result</th></tr></thead><tbody id="jobs-body"></tbody></table></div>
+        <div class="empty-state" id="empty-state"><span class="empty-icon"><svg class="icon" aria-hidden="true"><use href="#i-list"/></svg></span><h3>No results yet</h3><p>Your batch results will appear here.</p></div>
+        <div class="table-footer"><span id="table-summary">No accounts processed</span><span><span class="live-dot"></span>Live updates</span></div>
+      </section>
+      <section class="card activity-card" id="activity"><div class="card-heading section-heading"><h2>Activity</h2><span class="section-note"><span class="live-dot"></span>Live</span></div><ol id="activity-list"><li class="activity-empty">No activity yet.</li></ol></section>
+      <%- include('partials/footer') %>
+    </main>
+  </div>
+  <dialog id="result-modal" aria-labelledby="modal-title"><div class="modal-header"><div class="modal-heading"><h2 id="modal-title">Task result</h2><p id="modal-subtitle"></p></div><div class="modal-actions"><a class="button button-secondary" id="download-image" download>Download</a><button type="button" class="icon-button" id="close-modal" aria-label="Close result"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></div></div><div id="image-container"><img id="result-image" alt="Automation result screenshot"></div><div id="log-container" hidden><ol id="task-logs"></ol></div></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>
