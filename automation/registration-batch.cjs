@@ -5,6 +5,7 @@ const { createMaskifyProxy } = require('../maskify.cjs');
 const { generateProfile } = require('../random.js');
 const path = require('node:path');
 const { diagnosticImage } = require('../artifacts.cjs');
+const { abortable, withDeadline } = require('../async-control.cjs');
 
 // Batch attempts that need manual attention fail so the worker can move on.
 const finished = new Set(['complete', 'failed', 'paused', 'cancelled', 'needs_attention']);
@@ -25,9 +26,11 @@ function batchInput({ connectionMode, accountCount, concurrency, proxyText } = {
 }
 
 class RegistrationBatchRunner extends EventEmitter {
-  constructor({ assistant, makeProfile = generateProfile, timeoutMs = 90 * 60_000 } = {}) {
+  constructor({ assistant, makeProfile = generateProfile, timeoutMs = 90 * 60_000,
+    cleanupTimeoutMs = Number(process.env.BROWSER_CLEANUP_TIMEOUT_MS || 20_000) } = {}) {
     super();
-    Object.assign(this, { assistant, makeProfile, timeoutMs, run: null, done: Promise.resolve(), workers: new Map() });
+    if (!Number.isFinite(cleanupTimeoutMs) || cleanupTimeoutMs <= 0) throw new Error('Browser cleanup timeout must be positive.');
+    Object.assign(this, { assistant, makeProfile, timeoutMs, cleanupTimeoutMs, run: null, done: Promise.resolve(), workers: new Map() });
   }
 
   snapshot() { return { run: this.run ? structuredClone(this.run) : null }; }
@@ -71,7 +74,7 @@ class RegistrationBatchRunner extends EventEmitter {
   }
 
   async execute(run, options) {
-    // Profiles stay private and are reused without their previous phone activation.
+    // Profiles stay private. Phone allocation is handled by the shared pool.
     const profiles = new Map();
     try {
       let next = 0;
@@ -122,7 +125,7 @@ class RegistrationBatchRunner extends EventEmitter {
     this.publish();
     try {
       let profile = profiles.get(job.id);
-      if (!profile) { profile = await this.makeProfile(); profiles.set(job.id, profile); }
+      if (!profile) { profile = await abortable(() => this.makeProfile({ signal }), { signal }); profiles.set(job.id, profile); }
       if (attempt > 1) {
         const previous = job.attempts.at(-1);
         const saved = previous?.registrationId ? this.assistant.store.get(previous.registrationId) : null;
@@ -153,9 +156,10 @@ class RegistrationBatchRunner extends EventEmitter {
       worker.on('state', update);
       abort = () => { void worker.closeBrowser().catch(() => {}); };
       signal.addEventListener('abort', abort, { once: true });
-      // Retries get a fresh worker and phone purchase at the phone step. Each
+      // Retries get a fresh worker and a pool lease at the phone step. Each
       // uploaded proxy is consumed once; Maskify creates a new sticky session.
-      await worker.start(profile, { mode: run.connectionMode, ...(proxyText ? { proxyText } : {}) });
+      await abortable(() => worker.start(profile, { mode: run.connectionMode, ...(proxyText ? { proxyText } : {}), signal }),
+        { signal, onLateResult: () => worker.forceClose?.() });
       await this.waitForAccount(worker, signal);
       if (worker.state?.status !== 'complete') throw new Error(worker.state?.stage || 'Registration did not complete.');
       job.status = 'success'; job.stage = worker.state.stage || 'Account created';
@@ -184,8 +188,9 @@ class RegistrationBatchRunner extends EventEmitter {
       if (worker) {
         signal.removeEventListener('abort', abort);
         worker.off('state', update);
-        try { await worker.close(); }
+        try { await withDeadline(() => worker.close(), this.cleanupTimeoutMs); }
         catch {
+          worker.forceClose?.();
           job.cleanupError = 'Could not close the registration browser.';
           if (worker.state?.status !== 'complete') {
             job.status = 'failed'; job.stage = job.cleanupError;

@@ -8,6 +8,7 @@ const { frameVisible } = require("./ui.cjs");
 const { openProxy } = require("./proxy.cjs");
 const { checkProxyIp } = require("./proxy-ip.cjs");
 const { captureFailure, clearScreenshots } = require("./artifacts.cjs");
+const { abortable, withDeadline, closeOwnedBrowser, killOwnedBrowser } = require('./async-control.cjs');
 
 require("dotenv").config({ path: path.join(__dirname, ".env"), quiet: true });
 
@@ -271,7 +272,8 @@ async function click(browser, description, selector, hosts) {
 async function main({ afterLogin = enablePopImap, email = process.env.EMAIL, password = process.env.PASSWORD,
   proxyUrl = process.env.GMX_PROXY_URL, apiKey = process.env.ANYSOLVER_API_KEY, headless = false,
   onLog = console.log, onStage = () => {}, onPause = () => {}, onResume = () => {}, signal,
-  screenshotPath = path.join(__dirname, "artifacts", "gmx-pop3-imap-enabled.png"), closeDelayMs = 10_000 } = {}) {
+  screenshotPath = path.join(__dirname, "artifacts", "gmx-pop3-imap-enabled.png"), closeDelayMs = 10_000,
+  cleanupTimeoutMs = Number(process.env.BROWSER_CLEANUP_TIMEOUT_MS || 20_000) } = {}) {
   const secrets = [email, password, proxyUrl, apiKey];
   const hide = createRedactor(secrets);
   const log = (message) => onLog(hide(message));
@@ -279,23 +281,23 @@ async function main({ afterLogin = enablePopImap, email = process.env.EMAIL, pas
   const stage = (value) => { step = value; onStage(value); signal?.throwIfAborted(); };
   let capturing;
   const capture = () => capturing ||= captureFailure(browser, screenshotPath, { message: signal?.aborted ? "Stopped by user." : "Automation failed. See the task log for details.", stage: step, secrets });
-  const abort = () => { capture().finally(() => browser?.close().catch(() => {})); };
+  const abort = () => { void withDeadline(capture, Math.min(cleanupTimeoutMs, 2000)).catch(() => {}).then(() => closeOwnedBrowser(browser, cleanupTimeoutMs)).catch(() => {}); };
   try {
     stage(step);
     if (!email || !password || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Provide a full EMAIL address and PASSWORD.");
     solver = createCaptchaSolver({ ANYSOLVER_API_KEY: apiKey, GMX_PROXY_URL: proxyUrl }, { log, signal });
     if (solver) {
       log("Checking AnySolver API access and balance ...");
-      await solver.checkAccount();
+      await abortable(() => solver.checkAccount(), { signal });
     }
     stage("launching Chrome");
-    proxy = await openProxy(proxyUrl, log);
+    proxy = await abortable(() => openProxy(proxyUrl, log), { signal, onLateResult: value => withDeadline(() => value.close(), cleanupTimeoutMs) });
     signal?.throwIfAborted();
-    browser = await puppeteer.launch({ headless,
+    browser = await abortable(() => puppeteer.launch({ headless,
       defaultViewport: headless ? { width: 1440, height: 1000 } : null,
       args: ["--start-maximized", ...(process.platform === "linux" && process.env.DISPLAY ? ["--ozone-platform=x11"] : []),
         ...(proxy.argument ? [proxy.argument] : [])],
-    });
+    }), { signal, onLateResult: value => closeOwnedBrowser(value, cleanupTimeoutMs) });
     signal?.addEventListener("abort", abort, { once: true });
     signal?.throwIfAborted();
     const runtime = { log, redact: hide, signal, headless, onPause, onResume };
@@ -325,7 +327,7 @@ async function main({ afterLogin = enablePopImap, email = process.env.EMAIL, pas
     });
     if (proxy.argument) {
       stage("checking proxy public IP");
-      const ip = await checkProxyIp(page, { log, signal });
+      const ip = await abortable(() => checkProxyIp(page, { log, signal }), { signal });
       const message = ip ? `Proxy public IP: ${ip}` : 'Proxy public IP unavailable. Continuing to GMX with the configured proxy.';
       log(message);
       if (onLog !== console.log) console.log(`[IMAP / POP3] ${message}`);
@@ -385,15 +387,20 @@ async function main({ afterLogin = enablePopImap, email = process.env.EMAIL, pas
     if (closeDelayMs > 0) { log(`Waiting ${closeDelayMs / 1000} seconds before closing ...`); await sleep(closeDelayMs, undefined, { signal }); }
     return { ...result, artifactKind: result.artifactKind || "screenshot" };
   } catch (error) {
-    artifact = await capture();
+    artifact = await withDeadline(capture, signal?.aborted ? Math.min(cleanupTimeoutMs, 2000) : cleanupTimeoutMs).catch(() => ({}));
     const failure = new Error(signal?.aborted ? "Stopped by user." : `Failed while ${step}: ${hide(error.message)}`);
     Object.assign(failure, { code: signal?.aborted ? "CANCELLED" : error.code, step, screenshotPath: artifact.path, artifactKind: artifact.kind });
     throw failure;
   } finally {
     signal?.removeEventListener("abort", abort);
-    if (capturing) await capturing;
-    if (browser) await browser.close().catch(() => {});
-    await proxy?.close().catch(() => {});
+    try {
+      await withDeadline(async () => {
+        if (capturing) await capturing;
+        await browser?.close();
+        await proxy?.close().catch(() => {});
+        await solver?.closeProxy().catch(() => {});
+      }, cleanupTimeoutMs);
+    } catch { killOwnedBrowser(browser); void proxy?.close().catch(() => {}); void solver?.closeProxy().catch(() => {}); }
     log("Browser closed.");
   }
 }

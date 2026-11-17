@@ -20,7 +20,10 @@ puppeteer.use(StealthPlugin());
 const { Router } = require('express');
 const multer = require('multer');
 
-const { generateProfile, getSMS } = require('../random.js');
+const { generateProfile, getSMS, requestNextSms, checkSmsProvider } = require('../random.js');
+const { PhoneNumberPool, MAX_PHONE_USES, sharedProviderFailure } = require('./phone-pool.cjs');
+const { acquireInstanceLock } = require('../instance-lock.cjs');
+const { abortable, withDeadline, killOwnedBrowser, closeOwnedBrowser } = require('../async-control.cjs');
 
 const { createMaskifyProxy } = require('../maskify.cjs');
 
@@ -81,6 +84,9 @@ class RegistrationStore {
 
     fs.chmodSync(directory, 0o700);
 
+    this.instanceLock = acquireInstanceLock(directory);
+    try {
+
     this.keyPath = path.join(directory, "registration.key");
 
     if (!fs.existsSync(this.keyPath)) {
@@ -112,12 +118,19 @@ class RegistrationStore {
     this.db.exec(`PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS registration_exit_ips (fingerprint TEXT PRIMARY KEY, registration_id TEXT NOT NULL, reserved_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS registration_phone_numbers (fingerprint TEXT PRIMARY KEY, registration_id TEXT NOT NULL, reserved_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS registration_phone_pool (fingerprint TEXT PRIMARY KEY, secret BLOB NOT NULL, acquired_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, uses INTEGER NOT NULL, leased_to TEXT, retired_reason TEXT, created_at INTEGER NOT NULL);
+      CREATE UNIQUE INDEX IF NOT EXISTS registration_phone_lease ON registration_phone_pool(leased_to) WHERE leased_to IS NOT NULL;
       CREATE TABLE IF NOT EXISTS registration_batches (id TEXT PRIMARY KEY, status TEXT NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER);
       CREATE TABLE IF NOT EXISTS registration_batch_accounts (batch_id TEXT NOT NULL, registration_id TEXT NOT NULL UNIQUE, PRIMARY KEY(batch_id, registration_id));`);
 
     fs.chmodSync(this.dbPath, 0o600);
 
     this.seedPhoneReservations();
+
+    } catch (error) {
+      this.db?.close(); this.key?.fill(0); this.instanceLock.close();
+      throw error;
+    }
 
   }
 
@@ -220,6 +233,7 @@ class RegistrationStore {
       .run(Date.now());
 
     this.db.prepare("UPDATE registration_batches SET status='interrupted',finished_at=? WHERE status='running'").run(Date.now());
+    this.db.prepare("UPDATE registration_phone_pool SET uses=3,leased_to=NULL,retired_reason='server interrupted' WHERE leased_to IS NOT NULL").run();
 
   }
 
@@ -269,7 +283,10 @@ class RegistrationStore {
     const fingerprint = this.phoneFingerprint(details);
     this.db.prepare('INSERT OR IGNORE INTO registration_phone_numbers VALUES (?,?,?)').run(fingerprint, id, Date.now());
     const owner = this.db.prepare('SELECT registration_id FROM registration_phone_numbers WHERE fingerprint=?').get(fingerprint);
-    if (owner?.registration_id !== id) throw Object.assign(new Error('This phone number was already assigned to another registration. Use a different number.'), { code: 'PHONE_REUSED' });
+    const lease = this.db.prepare('SELECT leased_to,expires_at,retired_reason FROM registration_phone_pool WHERE fingerprint=?').get(fingerprint);
+    if (lease ? lease.leased_to !== id || lease.expires_at <= Date.now() || lease.retired_reason : owner?.registration_id !== id) {
+      throw Object.assign(new Error('This phone number is expired, retired, or assigned to another active registration.'), { code: 'PHONE_REUSED' });
+    }
   }
 
   createBatch(id) { this.db.prepare("INSERT INTO registration_batches VALUES (?,'running',?,NULL)").run(id, Date.now()); }
@@ -292,7 +309,11 @@ class RegistrationStore {
 
 
 
-  close() { this.db.close(); this.key.fill(0); }
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    try { this.db.close(); this.key.fill(0); } finally { this.instanceLock.close(); }
+  }
 
 }
 
@@ -719,29 +740,40 @@ class RegistrationAssistant extends EventEmitter {
 
     maskifyEnv = null, solverFactory = createCaptchaSolver, proxyIpCheck = checkProxyIp, purchasePhone = null,
 
-    smsClient = getSMS, smsPollMs = 5_000, smsTimeoutMs = 360_000, store = null, logLabel = '' } = {}) {
+    smsClient = getSMS, smsPollMs = 5_000, smsTimeoutMs = 360_000, store = null, logLabel = '', phonePool = null, nextSms = requestNextSms,
+    checkProvider = checkSmsProvider, cleanupTimeoutMs = Number(process.env.BROWSER_CLEANUP_TIMEOUT_MS || 20_000),
+    minPhoneRemainingMs = Number(process.env.SMS_MIN_REMAINING_MS || 120_000), providerCooldownMs = Number(process.env.SMS_PROVIDER_COOLDOWN_MS || 60_000) } = {}) {
 
     super();
+
+    if (!Number.isFinite(cleanupTimeoutMs) || cleanupTimeoutMs <= 0) throw new Error('Browser cleanup timeout must be positive.');
+    if (!Number.isFinite(minPhoneRemainingMs) || minPhoneRemainingMs < 0 || minPhoneRemainingMs >= 1_200_000) throw new Error('SMS minimum remaining lifetime must be between 0 and 20 minutes.');
+    if (!Number.isFinite(providerCooldownMs) || providerCooldownMs <= 0) throw new Error('SMS provider cooldown must be positive.');
 
     this.ownsStore = !store;
     this.store = store || new RegistrationStore(directory);
     if (this.ownsStore) this.store.markInterrupted();
 
     Object.assign(this, { launch, pollMs, transitionMs, solver: null, maskifyEnv, solverFactory, proxyIpCheck, purchasePhone, smsClient, smsPollMs, smsTimeoutMs, logLabel, browser: null, page: null, activeId: null, state: null, timer: null, work: null, stopped: true, logs: [] });
+    this.nextSms = nextSms;
+    this.cleanupTimeoutMs = cleanupTimeoutMs;
+    this.phonePool = phonePool || (purchasePhone ? new PhoneNumberPool({ store: this.store, purchasePhone, requestNextSms: nextSms,
+      checkProvider, minRemainingMs: minPhoneRemainingMs, cooldownMs: providerCooldownMs }) : null);
 
   }
 
   createWorker({ logLabel = '' } = {}) {
     return new RegistrationAssistant({ store: this.store, launch: this.launch, pollMs: this.pollMs, transitionMs: this.transitionMs,
       maskifyEnv: this.maskifyEnv, solverFactory: this.solverFactory, proxyIpCheck: this.proxyIpCheck,
-      purchasePhone: this.purchasePhone, smsClient: this.smsClient, smsPollMs: this.smsPollMs, smsTimeoutMs: this.smsTimeoutMs, logLabel });
+      purchasePhone: this.purchasePhone, smsClient: this.smsClient, smsPollMs: this.smsPollMs, smsTimeoutMs: this.smsTimeoutMs, logLabel,
+      phonePool: this.phonePool, nextSms: this.nextSms, cleanupTimeoutMs: this.cleanupTimeoutMs });
   }
 
   snapshot() { return { active: this.state ? { ...this.state, browserOpen: !!this.browser?.connected,
 
     smsRetryAvailable: this.state.status === 'awaiting_otp' && !!this.browser?.connected && !!this.smsPoll?.retryable && !!this.smsPoll?.finished,
 
-    logs: this.logs.slice(-20) } : null, records: this.store.list() }; }
+    logs: this.logs.slice(-20) } : null, records: this.store.list(), phoneNumbers: this.phonePool?.snapshot() || [], phoneProvider: this.phonePool?.providerStatus() || null }; }
 
   publish() { this.emit('state', this.snapshot()); }
 
@@ -776,6 +808,14 @@ class RegistrationAssistant extends EventEmitter {
 
     if (status === 'needs_attention') this.attentionKey = this.currentKey;
 
+    if (this.phoneLease && this.phonePool) {
+      if (['failed', 'cancelled', 'paused', 'needs_attention'].includes(status)) this.retirePhone(status);
+      else if (status === 'complete') {
+        const info = this.phonePool.finish(this.activeId);
+        if (info) this.state = { ...this.state, phoneUsage: info.uses, phoneExpiresAt: info.expiresAt };
+      }
+    }
+
     if (this.state?.status === status && this.state?.stage === stage && this.state?.phase === phase) return;
 
     this.state = { ...this.state, status, stage, phase, updatedAt: Date.now() };
@@ -787,6 +827,19 @@ class RegistrationAssistant extends EventEmitter {
 
     this.printLog(message);
 
+  }
+
+  retirePhone(reason) {
+    if (!this.phoneLease || !this.phonePool) return;
+    this.phonePool.retire(this.activeId, reason);
+    this.state = { ...this.state, phoneUsage: MAX_PHONE_USES, phoneRetiredReason: reason };
+    this.store.update(this.activeId, { phoneUsage: MAX_PHONE_USES, phoneRetiredReason: reason });
+  }
+
+  checkPhoneLease() {
+    if (!this.phoneLease || !this.phonePool) return true;
+    try { this.phonePool.assertActive(this.activeId); return true; }
+    catch (error) { this.recordFailure(error.code || 'PHONE_EXPIRED', error, { phase: this.state?.phase || 'phone' }); return false; }
   }
 
   recordFailure(code, reason, { phase = this.state?.phase || 'startup', status = 'failed' } = {}) {
@@ -832,6 +885,7 @@ class RegistrationAssistant extends EventEmitter {
   async start(input, options) {
 
     if (this.starting || this.browser?.connected) throw new Error('Finish or close the open GMX registration before starting another.');
+    options?.signal?.throwIfAborted();
 
     const connection = registrationConnection(options);
     const profile = validateProfile(input);
@@ -840,19 +894,24 @@ class RegistrationAssistant extends EventEmitter {
 
     try {
 
-      if (this.browserCleanup) await this.browserCleanup;
+      if (this.browserCleanup) await abortable(() => this.browserCleanup, { signal: options?.signal });
+      options?.signal?.throwIfAborted();
 
       const id = this.store.create({ ...profile, email: null, candidateEmail: profile.requestedEmail || emailCandidate(profile.firstName, profile.lastName) });
 
       Object.assign(this, { activeId: id, logs: [], redactions: new Set(), currentKey: null, attentionKey: null, prepared: null, submitted: null, pendingCode: null, otpReady: false,
 
-        phoneApproved: !!profile.phone, phonePurchaseStatus: profile.phone ? 'provided' : 'idle', failures: 0, unknownSince: null, manualCaptcha: null, stopped: false,
+        phoneApproved: !!profile.phone, phonePurchaseStatus: profile.phone ? 'provided' : 'idle', phoneLease: null, failures: 0, unknownSince: null, manualCaptcha: null, stopped: false,
 
         smsController: new AbortController(), exitIpReserved: false, smsResendAttempted: false, lastRequestIssue: null, lastVisibleError: null, failureCapture: null,
 
         smsPoll: profile.heroSMS ? { activationId: profile.heroSMS.activationId, deadline: null, nextAt: 0, finished: false, retryable: false, providerStatus: null } : null,
 
         state: { id, status: 'starting', phase: 'profile', stage: 'Opening GMX registration', connectionMode: connection.mode, emailHint: 'Email not chosen yet', passwordReady: true, updatedAt: Date.now() } });
+
+      const startupSignal = options?.signal ? AbortSignal.any([options.signal, this.smsController.signal]) : this.smsController.signal;
+      const step = work => abortable(work, { signal: startupSignal });
+      startupSignal.throwIfAborted();
 
       this.publish();
 
@@ -887,7 +946,7 @@ class RegistrationAssistant extends EventEmitter {
         this.solver = this.solverFactory({ ...this.maskifyEnv, GMX_PROXY_URL: maskify.url }, {
 
           log: message => this.addLog(`Solver: ${message}`),
-          signal: this.smsController.signal,
+          signal: startupSignal,
 
         });
 
@@ -901,7 +960,7 @@ class RegistrationAssistant extends EventEmitter {
 
         this.addLog('Solver detected. Checking balance...');
 
-        await this.solver.checkAccount(); 
+        await step(() => this.solver.checkAccount());
 
       } else {
 
@@ -932,7 +991,7 @@ class RegistrationAssistant extends EventEmitter {
         profile: { default_content_setting_values: { geolocation: 2, media_stream_camera: 2, media_stream_mic: 2, notifications: 2 } },
       }), { flag: 'wx', mode: 0o600 });
 
-      this.browser = await this.launch({
+      this.browser = await abortable(() => this.launch({
 
         headless: false,
 
@@ -954,7 +1013,7 @@ class RegistrationAssistant extends EventEmitter {
           ...(process.platform === 'linux' && process.env.DISPLAY ? ['--ozone-platform=x11'] : [])
         ]
 
-      });
+      }), { signal: startupSignal, onLateResult: browser => closeOwnedBrowser(browser, this.cleanupTimeoutMs) });
 
       this.smsController.signal.throwIfAborted();
 
@@ -1028,9 +1087,9 @@ class RegistrationAssistant extends EventEmitter {
 
 
 
-      this.page = (await this.browser.pages())[0] || await this.browser.newPage();
+      this.page = (await step(() => this.browser.pages()))[0] || await step(() => this.browser.newPage());
 
-      await install(this.page);
+      await step(() => install(this.page));
          try {
         const fp = await this.page.evaluate(() => ({
           ua: navigator.userAgent,
@@ -1051,7 +1110,7 @@ class RegistrationAssistant extends EventEmitter {
 
         this.addLog('Checking the proxy public IP...');
 
-        const ip = await this.proxyIpCheck(this.page, { log: message => this.addLog(message), signal: this.smsController.signal });
+        const ip = await step(() => this.proxyIpCheck(this.page, { log: message => this.addLog(message), signal: startupSignal }));
 
         if (ip == null) {
 
@@ -1102,13 +1161,13 @@ class RegistrationAssistant extends EventEmitter {
 
           }
 
-          await this.page.goto('https\://register.gmx.net/', { waitUntil: 'domcontentloaded', timeout: 120_000 });
+          await step(() => this.page.goto('https\://register.gmx.net/', { waitUntil: 'domcontentloaded', timeout: 120_000 }));
 
           const deadline = Date.now() + 120_000;
 
           while (true) {
 
-            const initial = await dom.scan(this.browser);
+            const initial = await step(() => dom.scan(this.browser));
             if (initial?.registrationHelp) {
               await this.failRegistrationHelp(initial.page);
               throw new Error('GMX redirected to registration help. The attempt was stopped.');
@@ -1119,7 +1178,7 @@ class RegistrationAssistant extends EventEmitter {
 
             if (Date.now() > deadline) throw Object.assign(new Error('GMX did not show its first registration form within 120 seconds.'), { name: 'TimeoutError' });
 
-            await sleep(300);
+            await sleep(300, undefined, { signal: startupSignal });
 
           }
 
@@ -1153,19 +1212,20 @@ class RegistrationAssistant extends EventEmitter {
 
       }
 
-      await this.tick(); this.watch(); return this.snapshot();
+      await step(() => this.tick()); startupSignal.throwIfAborted(); this.watch(); return this.snapshot();
 
     } catch (error) {
 
       const blocked = !this.exitIpReserved;
       if (this.state && !this.stopped) {
-        const code = ['IP_REUSED', 'IP_UNVERIFIED', 'PHONE_REUSED'].includes(error?.code) ? error.code : 'STARTUP_FAILED';
-        this.recordFailure(code, error, { phase: code.startsWith('IP_') ? 'proxy_check' : this.state.phase, status: blocked ? 'failed' : 'needs_attention' });
+        const cancelled = options?.signal?.aborted || this.smsController?.signal.aborted;
+        const code = cancelled ? 'CANCELLED_BY_USER' : ['IP_REUSED', 'IP_UNVERIFIED', 'PHONE_REUSED'].includes(error?.code) ? error.code : 'STARTUP_FAILED';
+        this.recordFailure(code, error, { phase: code.startsWith('IP_') ? 'proxy_check' : this.state.phase, status: cancelled ? 'cancelled' : blocked ? 'failed' : 'needs_attention' });
       }
 
       if (blocked || this.stopped) await this.closeBrowser();
 
-      if (!this.browser?.connected) await this.solver?.closeProxy().catch(() => {});
+      if (!this.browser?.connected) await withDeadline(() => this.solver?.closeProxy(), this.cleanupTimeoutMs).catch(() => {});
 
       throw new Error(this.safeError(error));
 
@@ -1184,6 +1244,7 @@ class RegistrationAssistant extends EventEmitter {
       this.work = this.tick().catch(error => {
 
         if (this.stopped) return;
+        if (this.phoneLease) { this.recordFailure('REGISTRATION_EXCEPTION', error); return; }
 
         if (/detached|context|navigation|not connected/i.test(error.message) && ++this.failures <= 3) return;
 
@@ -1213,11 +1274,20 @@ class RegistrationAssistant extends EventEmitter {
 
     this.phonePurchaseStatus = 'pending';
 
-    this.setState('running', 'Phone form reached · purchasing one SMS number', 'phone');
+    this.setState('running', 'Phone form reached · acquiring an unexpired SMS number', 'phone');
 
     try {
 
-      const number = await this.purchasePhone();
+      let number;
+      if (this.phonePool) {
+        this.phoneLease = await this.phonePool.acquire(id, { signal: this.smsController.signal,
+          onPause: () => {
+            this.setState('running', 'SMS provider paused · waiting for a successful health check before allocating another number', 'phone');
+            this.publish();
+          } });
+        number = this.phoneLease.number;
+        this.state = { ...this.state, phoneUsage: this.phoneLease.uses, phoneMaxUses: MAX_PHONE_USES, phoneExpiresAt: this.phoneLease.expiresAt };
+      } else number = await abortable(() => this.purchasePhone({ signal: this.smsController.signal }), { signal: this.smsController.signal });
 
       const details = phoneDetails(number?.phoneNumber, undefined, this.store.get(id).country);
 
@@ -1234,17 +1304,18 @@ class RegistrationAssistant extends EventEmitter {
       const heroSMS = { activationId: String(number.activationId) };
       this.redactions.add(heroSMS.activationId);
 
-      this.store.update(id, { ...details, heroSMS });
+      this.store.update(id, { ...details, heroSMS,
+        ...(this.phoneLease ? { phoneUsage: this.phoneLease.uses, phoneExpiresAt: this.phoneLease.expiresAt } : {}) });
 
       this.phonePurchaseStatus = 'purchased';
 
-      if (this.stopped || id !== this.activeId) return false;
+      if (this.stopped || id !== this.activeId) { this.phonePool?.retire(id, 'cancelled during acquisition'); return false; }
 
       this.phoneApproved = true;
 
       this.smsPoll = { activationId: heroSMS.activationId, deadline: null, nextAt: 0, finished: false, retryable: false, providerStatus: null };
 
-      this.addLog('SMS number saved. Continuing with the phone form.');
+      this.addLog(this.phoneLease ? `SMS number saved · use ${this.phoneLease.uses}/3 · expires at ${new Date(this.phoneLease.expiresAt).toISOString()}.` : 'SMS number saved. Continuing with the phone form.');
 
       return true;
 
@@ -1252,7 +1323,8 @@ class RegistrationAssistant extends EventEmitter {
 
       this.phonePurchaseStatus = 'failed';
 
-      if (!this.stopped) this.setState('awaiting_phone', `Number purchase stopped: ${this.safeError(error)} Enter a phone number manually. No automatic repurchase will be made.`, 'phone');
+      this.phonePool?.retire(id, 'phone acquisition failed');
+      if (!this.stopped) this.recordFailure(error.code || 'PHONE_ACQUISITION_FAILED', error, { phase: 'phone' });
 
       return false;
 
@@ -1368,6 +1440,8 @@ class RegistrationAssistant extends EventEmitter {
 
       const solved = await this.solver.trySolve(view.frame).catch((err) => {
 
+        if (this.phoneLease) throw err;
+
         if (!this.stopped) this.addLog(`Solver crashed: ${this.safeError(err)}`);
 
         return false;
@@ -1453,8 +1527,9 @@ class RegistrationAssistant extends EventEmitter {
             return;
           }
         }
-      } catch {
+      } catch (error) {
         if (this.stopped || this.pendingCode || this.otpReady) return;
+        if (this.phoneLease) { this.recordFailure('SMS_RESEND_FAILED', error, { phase: 'otp' }); return; }
         this.addLog(this.smsResendAttempted ? 'The SMS resend click could not be confirmed. It will not be repeated automatically.' : 'The SMS resend button could not be checked. Manual entry remains available.');
       } finally { await Promise.all(buttons.map(button => button.dispose().catch(() => {}))); }
     }
@@ -1462,6 +1537,8 @@ class RegistrationAssistant extends EventEmitter {
   }
 
   async pollSms() {
+
+    if (!this.checkPhoneLease()) return;
 
     const poll = this.smsPoll;
 
@@ -1525,9 +1602,13 @@ class RegistrationAssistant extends EventEmitter {
 
       }
 
-      poll.finished = true;
-
       if (sms?.status === 'RECEIVED' && typeof sms.otp === 'string' && /^\d{4,10}$/.test(sms.otp.trim())) {
+
+        if (this.phoneLease && this.phonePool.isPreviousCode(this.activeId, sms.otp)) {
+          this.addLog('Ignoring a previously used SMS code · waiting for a new message.');
+          return;
+        }
+        poll.finished = true;
 
         this.addLog('HeroSMS verification code received · preparing to fill GMX.');
 
@@ -1537,6 +1618,12 @@ class RegistrationAssistant extends EventEmitter {
 
       } else {
 
+        if (this.phoneLease) {
+          if (sharedProviderFailure({ code: sms?.rawStatus })) this.phonePool.pause({ code: sms.rawStatus });
+          this.recordFailure('SMS_INVALID_RESPONSE', 'HeroSMS cancelled the activation or returned an invalid code.', { phase: 'otp' }); return;
+        }
+        poll.finished = true;
+
         this.setState('awaiting_otp', sms?.status === 'CANCELLED'
 
           ? 'HeroSMS activation was cancelled · enter the code manually or review the phone number in Chrome'
@@ -1545,9 +1632,14 @@ class RegistrationAssistant extends EventEmitter {
 
       }
 
-    } catch {
+    } catch (error) {
 
       if (this.stopped || signal.aborted) return;
+
+      if (this.phoneLease) {
+        if (sharedProviderFailure(error)) this.phonePool.pause(error);
+        this.recordFailure(error.code || 'SMS_READ_FAILED', error, { phase: 'otp' }); return;
+      }
 
       if (Date.now() >= poll.deadline) { await this.handleSmsTimeout(poll); return; }
 
@@ -1562,6 +1654,8 @@ class RegistrationAssistant extends EventEmitter {
   async tick() {
 
     if (this.stopped || !this.state || terminal.has(this.state.status)) return;
+
+    if (!this.pendingCode && !this.otpReady && !this.checkPhoneLease()) { await this.releaseBrowser(); return; }
 
     if (!this.browser?.connected) { this.setState('paused', 'Registration browser closed · encrypted details saved'); return; }
 
@@ -1748,6 +1842,12 @@ class RegistrationAssistant extends EventEmitter {
 
     if (typeof code !== 'string' || !/^\d{4,10}$/.test(code.trim())) throw new Error('Enter the numeric SMS verification code.');
 
+    if (this.phoneLease) {
+      if (!this.checkPhoneLease()) return this.snapshot();
+      if (this.phonePool.isPreviousCode(this.activeId, code)) throw new Error('This SMS code belongs to an earlier use of the number. Wait for a new SMS.');
+      this.phonePool.rememberCode(this.activeId, code);
+    }
+
     if (this.smsPoll) { this.smsPoll.finished = true; this.smsPoll.retryable = false; }
 
     this.smsController?.abort();
@@ -1850,32 +1950,43 @@ class RegistrationAssistant extends EventEmitter {
 
   async closeBrowser() {
 
-    this.stopped = true; clearTimeout(this.timer); this.timer = null; this.smsController?.abort(); await this.work;
+    this.stopped = true; clearTimeout(this.timer); this.timer = null; this.smsController?.abort();
+    try {
+      await withDeadline(async () => { await this.work; this.smsPoll = null; await this.releaseBrowser(); }, this.cleanupTimeoutMs);
+    } catch (error) { this.forceClose(); throw error; }
 
-    this.smsPoll = null;
+  }
 
-    await this.releaseBrowser();
-
+  forceClose() {
+    this.stopped = true; clearTimeout(this.timer); this.timer = null; this.smsController?.abort();
+    if (this.state?.status !== 'complete') this.retirePhone('browser cleanup forced');
+    killOwnedBrowser(this.browser || this.closingBrowser);
+    this.browser = null; this.closingBrowser = null; this.browserCleanup = null; this.page = null; this.smsPoll = null;
+    void this.solver?.closeProxy().catch(() => {});
   }
 
   async releaseBrowser() {
 
+    if (this.state?.status !== 'complete') this.retirePhone('browser closed before success');
+
     if (this.browserCleanup) return this.browserCleanup;
 
     const browser = this.browser, page = this.page; this.browser = null; this.page = null; this.pendingCode = null;
+    this.closingBrowser = browser;
 
     const solver = this.solver;
-    const cleanup = this.browserCleanup = (async () => {
+    const cleanup = this.browserCleanup = withDeadline(async () => {
       if (this.state?.status !== 'complete') await this.saveFailureImage(browser, page);
-      await browser?.close().catch(() => {});
+      await browser?.close();
       await solver?.closeProxy().catch(() => {});
-    })();
+    }, this.cleanupTimeoutMs);
     try { await cleanup; }
-    finally { if (this.browserCleanup === cleanup) this.browserCleanup = null; }
+    catch (error) { killOwnedBrowser(browser); throw error; }
+    finally { if (this.browserCleanup === cleanup) { this.browserCleanup = null; this.closingBrowser = null; } }
 
   }
 
-  async close() { await this.closeBrowser(); if (this.ownsStore) this.store.close(); }
+  async close() { if (this.ownsStore && this.store.closed) return; try { await this.closeBrowser(); } finally { if (this.ownsStore) this.store.close(); } }
 
 }
 

@@ -71,10 +71,16 @@
   $("increment").addEventListener("click", () => adjust(1));
   $("concurrency").addEventListener("input", renderControls);
   document.querySelectorAll('[name="headless"]').forEach((input) => input.addEventListener("change", renderControls));
+  $("imap-connection").addEventListener("change", renderControls);
   function renderControls() {
     const active = !!state.run?.active, busy = active || submitting;
+    const maskify = $("imap-connection").value === "maskify";
     $("config-fields").disabled = busy;
-    $("start-button").disabled = busy || !counts.accounts || !counts.proxies;
+    $("imap-proxy-field").hidden = maskify;
+    $("imap-maskify-help").hidden = !maskify;
+    $("proxies").disabled = busy || maskify;
+    $("proxies").required = !maskify;
+    $("start-button").disabled = busy || !counts.accounts || (!maskify && !counts.proxies);
     $("start-spinner").hidden = !busy;
     $("start-arrow").hidden = busy;
     $("start-label").textContent = submitting ? "Starting…" : active ? "Batch running" : state.run ? "Start new batch" : "Start batch";
@@ -134,7 +140,7 @@
     if (jobs.length && !visible.length) { $("empty-state").querySelector("h3").textContent = "No matching accounts"; $("empty-state").querySelector("p").textContent = "Try another filter."; }
     const rows = visible.map((job) => {
       const tr = node("tr"), account = node("td"), cell = node("div", "account-cell"), details = node("div");
-      details.append(node("strong", "", job.account), node("small", "", `Account ${String(job.index).padStart(2,"0")} · ${job.proxy ? `Proxy ${String(job.proxy).padStart(2,"0")}` : "Awaiting proxy"}`));
+      details.append(node("strong", "", job.account), node("small", "", `Account ${String(job.index).padStart(2,"0")} · ${run.connectionMode === "maskify" ? "Maskify session" : job.proxy ? `Proxy ${String(job.proxy).padStart(2,"0")}` : "Awaiting proxy"}`));
       cell.append(node("span", "account-avatar", String(job.index).padStart(2,"0")), details); account.append(cell);
       const badgeCell = node("td"), info = status[job.status] || status.queued, badge = node("span", `badge ${info[1]}`);
       if (job.status === "running") badge.append(node("span", "spinner"));

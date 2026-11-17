@@ -9,7 +9,8 @@ const { RegistrationBatchRunner } = require('../automation/registration-batch.cj
 const { RegistrationAssistant } = require('../automation/registration.cjs');
 
 function createBatch({ outcomes = [], outcomeFor, timing = 'watch', proxyCount = 40, profile: suppliedProfile,
-  closeError = false, connectionMode = 'proxy', makeProfile, directory } = {}) {
+  closeError = false, connectionMode = 'proxy', makeProfile, directory, hangClose = false, hangStart = false,
+  cleanupTimeoutMs = 100 } = {}) {
   const workers = [], events = [], records = new Map(), links = [], purchases = [], reservations = new Map();
   let active = 0, maxActive = 0, batchStatus, profilesGenerated = 0;
   const store = {
@@ -57,6 +58,7 @@ function createBatch({ outcomes = [], outcomeFor, timing = 'watch', proxyCount =
       worker.start = async (profile, options) => {
         worker.profile = structuredClone(profile);
         worker.connectionMode = options.mode;
+        worker.startSignal = options.signal;
         worker.proxyText = options.proxyText;
         active++; maxActive = Math.max(maxActive, active);
         events.push(`start:${sequence}`);
@@ -67,6 +69,7 @@ function createBatch({ outcomes = [], outcomeFor, timing = 'watch', proxyCount =
         worker.phonePurchaseStatus = profile.phone ? 'provided' : 'idle';
         worker.phoneApproved = !!profile.phone;
         worker.setState('running', 'Registering');
+        if (hangStart) await new Promise(() => {});
         if (!worker.stopped) await RegistrationAssistant.prototype.acquirePhone.call(worker);
         const finish = () => {
           if (worker.stopped) return;
@@ -93,8 +96,13 @@ function createBatch({ outcomes = [], outcomeFor, timing = 'watch', proxyCount =
         return worker.closing;
       };
       worker.close = async () => {
+        if (hangClose) await new Promise(() => {});
         await worker.closeBrowser();
         if (closeError) throw new Error('Simulated cleanup failure');
+      };
+      worker.forceClose = () => {
+        worker.forced = true; worker.stopped = true; clearImmediate(worker.timer);
+        if (worker.browser.connected) { worker.browser.connected = false; active--; events.push(`close:${sequence}`); }
       };
       return worker;
     },
@@ -102,7 +110,7 @@ function createBatch({ outcomes = [], outcomeFor, timing = 'watch', proxyCount =
   const runner = new RegistrationBatchRunner({ assistant, makeProfile: makeProfile || (async () => {
     profilesGenerated++;
     return { firstName: `Profile${profilesGenerated}`, password: 'test-password', ...suppliedProfile };
-  }), timeoutMs: 250 });
+  }), timeoutMs: 250, cleanupTimeoutMs });
   const start = () => runner.start({ connectionMode, accountCount: 10, concurrency: 2,
     ...(connectionMode === 'proxy' ? { proxyText: Array.from({ length: proxyCount }, (_, index) => `http://127.0.0.1:${21000 + index}`).join('\n') } : {}) });
   return { runner, start, workers, events, records, links, purchases,
@@ -317,4 +325,31 @@ test('profile failures retain separate diagnostic images accessible after every 
     assert.equal(artifact.kind, 'diagnostic');
     assert.match(await readFile(artifact.path, 'utf8'), /PROFILE_GENERATION_FAILED/);
   }
+});
+
+test('hung browser cleanup is forced and the remaining queue still runs', { timeout: 2000 }, async () => {
+  const { runner, start, workers, stats } = createBatch({ hangClose: true, cleanupTimeoutMs: 10 });
+  start(); await runner.done;
+  assert.equal(workers.length, 10);
+  assert.ok(workers.every(worker => worker.forced && !worker.browser.connected));
+  assert.ok(runner.run.jobs.every(job => job.status === 'success' && job.cleanupError));
+  assert.equal(stats().active, 0);
+});
+
+test('Stop during startup cancels hung workers and never opens queued registrations', { timeout: 2000 }, async () => {
+  const { runner, start, workers, stats } = createBatch({ hangStart: true });
+  start(); await nextTurn(); runner.stop(); await runner.done;
+  assert.equal(workers.length, 2);
+  assert.ok(workers.every(worker => worker.startSignal.aborted && !worker.browser.connected));
+  assert.ok(runner.run.jobs.every(job => job.status === 'cancelled'));
+  assert.equal(stats().active, 0);
+});
+
+test('Stop during asynchronous profile generation does not create a browser later', { timeout: 2000 }, async () => {
+  let finish;
+  const { runner, start, workers } = createBatch({ makeProfile: () => new Promise(resolve => { finish = resolve; }) });
+  start(); await nextTurn(); runner.stop(); await runner.done;
+  finish({ firstName: 'Late profile' }); await nextTurn();
+  assert.equal(workers.length, 0);
+  assert.ok(runner.run.jobs.every(job => job.status === 'cancelled'));
 });

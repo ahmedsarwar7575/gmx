@@ -4,13 +4,17 @@ const path = require("node:path");
 const { main, createRedactor } = require("./login.cjs");
 const { ARTIFACTS, clearScreenshots, diagnosticImage } = require("./artifacts.cjs");
 const { maskEmail } = require("./inputs.cjs");
+const { createMaskifyProxy } = require("./maskify.cjs");
 
 class BatchRunner extends EventEmitter {
-  constructor({ automate = main, root = ARTIFACTS, apiKey = process.env.ANYSOLVER_API_KEY } = {}) {
+  constructor({ automate = main, root = ARTIFACTS, apiKey = process.env.ANYSOLVER_API_KEY,
+    maskifyEnv = process.env, makeMaskifyProxy = createMaskifyProxy } = {}) {
     super();
     this.automate = automate;
     this.root = root;
     this.apiKey = apiKey;
+    this.maskifyEnv = maskifyEnv;
+    this.makeMaskifyProxy = makeMaskifyProxy;
     this.run = null;
     this.controllers = new Set();
     this.revision = 0;
@@ -20,13 +24,15 @@ class BatchRunner extends EventEmitter {
   snapshot() { return { revision: this.revision, run: this.run ? structuredClone(this.run) : null, configuredSolver: !!this.apiKey }; }
   publish() { this.revision++; this.emit("state", this.snapshot()); }
 
-  async start({ accounts, proxies, concurrency = 2, headless = false }) {
+  async start({ accounts, proxies = [], connectionMode = 'proxy', concurrency = 2, headless = false }) {
     if (this.run?.active) throw new Error("A batch is already running.");
-    if (!accounts.length || !proxies.length || !Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error("Choose accounts, proxies and 1–8 parallel tasks.");
+    if (!['proxy', 'maskify'].includes(connectionMode)) throw new Error('Choose HTTP proxy or Maskify API.');
+    if (!accounts.length || (connectionMode === 'proxy' && !proxies.length) || !Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error("Choose accounts, a connection and 1–8 parallel tasks.");
+    if (connectionMode === 'maskify') this.makeMaskifyProxy(this.maskifyEnv);
     const id = randomUUID();
     const run = this.run = { id, active: true, stopping: false, startedAt: Date.now(), finishedAt: null,
-      concurrency: Math.min(concurrency, accounts.length, proxies.length), requestedConcurrency: concurrency,
-      headless, proxyCount: proxies.length, removedScreenshots: 0,
+      concurrency: Math.min(concurrency, accounts.length, connectionMode === 'proxy' ? proxies.length : concurrency), requestedConcurrency: concurrency,
+      headless, connectionMode, proxyCount: connectionMode === 'proxy' ? proxies.length : 0, removedScreenshots: 0,
       jobs: accounts.map((account, index) => ({ id: randomUUID(), index: index+1, account: maskEmail(account.email),
         status: "queued", stage: "Waiting for a worker", logs: [], startedAt: null, finishedAt: null,
         proxy: null, screenshotUrl: null, artifactKind: null, error: null, alreadyEnabled: null })),
@@ -62,19 +68,26 @@ class BatchRunner extends EventEmitter {
           this.publish();
           continue;
         }
-        const slot = randomInt(available.length), proxyIndex = available.splice(slot, 1)[0];
-        const proxyUrl = proxies[proxyIndex];
+        const proxyIndex = run.connectionMode === 'proxy' ? available.splice(randomInt(available.length), 1)[0] : null;
+        let proxyUrl = proxyIndex === null ? null : proxies[proxyIndex];
         const controller = new AbortController();
         this.controllers.add(controller);
-        const hide = createRedactor([account.email, account.password, proxyUrl, this.apiKey]);
+        let hide = createRedactor([account.email, account.password, proxyUrl, this.apiKey,
+          this.maskifyEnv?.MASKIFY_USERNAME, this.maskifyEnv?.MASKIFY_PASSWORD]);
         const log = (message) => {
           job.logs.push({ time: Date.now(), message: hide(message).slice(0, 1800) });
           if (job.logs.length > 120) job.logs.shift();
           this.publish();
         };
-        Object.assign(job, { status: "running", startedAt: Date.now(), proxy: proxyIndex+1, stage: "Starting Chrome" });
+        Object.assign(job, { status: "running", startedAt: Date.now(), proxy: proxyIndex === null ? null : proxyIndex+1, stage: "Starting Chrome" });
         this.publish();
         try {
+          if (run.connectionMode === 'maskify') {
+            proxyUrl = this.makeMaskifyProxy(this.maskifyEnv).url;
+            hide = createRedactor([account.email, account.password, proxyUrl, this.apiKey,
+              this.maskifyEnv.MASKIFY_USERNAME, this.maskifyEnv.MASKIFY_PASSWORD]);
+            log('Using a German Maskify session for this account.');
+          }
           const result = await this.automate({ ...account, proxyUrl, apiKey: this.apiKey, headless: run.headless,
             signal: controller.signal, closeDelayMs: 0, screenshotPath: filename, onLog: log,
             onStage: (stage) => { if (job.stage !== stage) { job.stage = hide(stage); this.publish(); } },
@@ -96,7 +109,7 @@ class BatchRunner extends EventEmitter {
           this.setArtifact(run, job, image.path, image.kind);
         } finally {
           this.controllers.delete(controller);
-          available.push(proxyIndex);
+          if (proxyIndex !== null) available.push(proxyIndex);
           account.password = "";
           job.finishedAt = Date.now();
           this.publish();

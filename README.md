@@ -22,16 +22,22 @@ npm start
 
 Open **http://127.0.0.1:3000**. Set `PORT` in `.env` to use another port.
 The dashboard binds to the local computer and is intended for local use.
+Only one instance can use a registration data directory at a time. A second
+instance is rejected before opening the account database or changing phone leases.
+The operating system releases the instance lock after normal exit or a crash.
 
 ## Configuration
 
 | Variable | Purpose |
 | --- | --- |
 | `PORT` | Dashboard port; defaults to `3000` |
-| `MASKIFY_USERNAME`, `MASKIFY_PASSWORD` | Required for Maskify registration mode |
+| `MASKIFY_USERNAME`, `MASKIFY_PASSWORD` | Required for Maskify mode in registration and IMAP/POP3 |
 | `MASKIFY_HOST`, `MASKIFY_PORT` | Maskify gateway; defaults to `resi.maskify.su:80` |
 | `ANYSOLVER_API_KEY` | Optional CAPTCHA solving for Maskify registration and proxied POP3/IMAP workers |
 | `HEROSMS_API_KEY` | Optional automatic German phone-number purchase and SMS retrieval during registration |
+| `SMS_MIN_REMAINING_MS` | Minimum remaining lifetime before assigning a number; defaults to `120000` (2 minutes) |
+| `SMS_PROVIDER_COOLDOWN_MS` | Delay before a read-only SMS provider health check after a shared failure; defaults to `60000` |
+| `BROWSER_CLEANUP_TIMEOUT_MS` | Browser cleanup deadline; defaults to `20000` (20 seconds) |
 | `EMAIL`, `PASSWORD`, `GMX_PROXY_URL` | Credentials and proxy for the single-account `npm run automate` command |
 
 Uploaded proxy pools are configured in the dashboard. They do not change `.env`.
@@ -73,8 +79,42 @@ Uncertain purchase requests are not automatically replayed. SMS reads reuse the
 same activation within an attempt; manual phone and code entry remain available.
 Each registration retry uses a fresh browser and saved registration record,
 keeps the account profile and chosen email/password, and clears the old phone
-and activation. A new phone is purchased only if the retry reaches the phone form.
-Previously reserved phone numbers and exit IPs cannot be reused.
+and activation from its profile. At the phone form, the shared SMS pool leases an
+eligible number or purchases a new one. Exit IPs remain unique per attempt.
+
+HeroSMS numbers support **up to three account attempts within 20 minutes** of
+purchase, or until the provider's earlier expiry. Reuse never extends this deadline.
+A number belongs to only one running registration at a time; parallel workers
+cannot consume its SMS messages simultaneously. Successful accounts release the
+number for its next use. Before reuse, HeroSMS must confirm a request for another
+SMS; previous code hashes prevent submitting an earlier account's code.
+Any registration or SMS exception retires that attempt's number at **3/3**.
+Expired, exhausted and retired numbers are never allocated again. A reset failure
+also retires the number and selects another eligible number or purchases one.
+The existing end-of-batch retry rounds continue to handle failed registrations.
+
+Expand **SMS number usage** in Registration to see masked numbers, usage out of
+three, remaining time and retirement reasons. Pool data and activation details
+are saved in the encrypted registration database. Server interruption retires
+numbers that were in use; eligible idle numbers keep their original expiry.
+Numbers from older registrations without pool metadata remain reserved.
+
+Numbers must have at least two minutes remaining before allocation or reuse.
+The check runs again after requesting the next SMS. A number that is too close
+to expiry is skipped; the original twenty-minute deadline is never extended.
+
+Shared network, provider, payment and authentication failures pause new SMS
+allocations. The number involved in a failed operation still retires at 3/3,
+while other idle numbers are preserved. After the cooldown, one shared read-only
+balance check probes the provider. Failed health checks extend the pause without
+resetting other numbers or purchasing replacements. The dashboard shows the pause
+and the next check; Stop interrupts the wait.
+
+Stop signals reach profile generation, startup checks and SMS purchases. A late
+purchase response that includes a known number is recorded and retired at 3/3.
+An allocation already accepted by the provider cannot be undone by local Stop.
+Browser cleanup has its own deadline and can force termination of the worker's
+own Chrome process, allowing the queue to continue even when graceful close hangs.
 
 Only a top-level HTTPS redirect to `/mail` (or `/mail/`) on `navigator.gmx.net`
 or one of its subdomains confirms registration success. This includes
@@ -173,13 +213,15 @@ that batch, exclude duplicate emails and preserve colons in passwords. If no
 accounts complete, the download is empty and the dashboard explains why.
 
 Saved registrations appear in the table below the form. Passwords are revealed
-on demand. Select completed accounts and upload proxies to run **IMAP / POP3**
-directly from the saved records.
+on demand. Select completed accounts and choose **HTTP proxy TXT** or **Maskify API**
+to run **IMAP / POP3** directly from the saved records.
 
 ## POP3 / IMAP
 
 1. Open **IMAP / POP3**.
-2. Upload an accounts TXT file and a proxy TXT file, up to **2 MB each**.
+2. Upload an accounts TXT file, up to **2 MB**, and choose **HTTP proxy TXT** or
+   **Maskify API**. HTTP mode requires a proxy TXT upload up to **2 MB**; Maskify
+   uses the configured credentials and requires no proxy upload.
 3. Choose **1–8 parallel workers** and visible or headless Chrome.
 4. Click **Start batch** and follow each account's progress, logs and result image.
 
@@ -205,8 +247,10 @@ https://username:password@proxy.example.com:8443
 URI-encode special characters in URL credentials. Proxy pools support up to
 1,000 entries and ignore blank lines, comments and duplicate entries.
 
-POP3/IMAP workers lease different proxy entries while running concurrently.
-Concurrency is limited by the available accounts and proxies. The browser and
+POP3/IMAP workers lease different uploaded proxy entries while running concurrently.
+In HTTP mode, concurrency is limited by the available accounts and proxies.
+Maskify creates a new German sticky session for every account and supports the
+requested worker count up to the number of accounts. The browser and
 CAPTCHA solver keep the same proxy for an account's flow. A proxy is never
 switched during an authenticated session.
 
@@ -232,7 +276,8 @@ Registration profiles and credentials are encrypted with AES-256-GCM in
 `data/registrations.sqlite`. The encryption key is stored separately in
 `data/registration.key`. Preserve both when moving or backing up saved accounts;
 the database cannot be decrypted without its key. Exit-IP fingerprints and batch
-manifests share the database. SMS codes remain in memory.
+manifests share the database. SMS codes remain in memory; keyed code hashes are
+stored with the encrypted phone pool to identify stale codes during reuse.
 
 The app creates `data/` and `artifacts/` when needed. Local `.env` files, account
 storage, browser profiles, uploads, generated exports, screenshots and dependencies

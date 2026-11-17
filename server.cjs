@@ -50,7 +50,14 @@ function createApp({ runner = new BatchRunner(), registrationAssistant = null, g
     next();
   });
   app.use("/api/registration", createRegistrationRouter(registrationAssistant, { generateProfile: generateRegistrationProfile, batch: registrationBatch }));
-  const selectedUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 1, fields: 3, parts: 4, fieldSize: 25_000 } });
+  const imapConnection = req => {
+    const connectionMode = req.body.connectionMode || 'proxy';
+    if (!['proxy', 'maskify'].includes(connectionMode)) throw new Error('Choose HTTP proxy or Maskify API.');
+    const file = req.file || req.files?.proxies?.[0];
+    if (connectionMode === 'proxy' && !file) throw new Error('Choose a proxy TXT file.');
+    return { connectionMode, proxies: connectionMode === 'proxy' ? parseProxies(file.buffer.toString('utf8')) : [] };
+  };
+  const selectedUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 1, fields: 4, parts: 5, fieldSize: 25_000 } });
   app.post('/api/registration-runs', (req, res, next) => {
     if (runner.run?.active) return res.status(409).json({ error: 'A batch is already running.' });
     if (!registrationAssistant?.accountsForBatch) return res.status(503).json({ error: 'Saved account automation is unavailable.' });
@@ -58,37 +65,39 @@ function createApp({ runner = new BatchRunner(), registrationAssistant = null, g
   }, selectedUpload.single('proxies'), async (req, res) => {
     let accounts;
     try {
-      if (!req.file) throw new Error('Choose a proxy TXT file.');
+      const connection = imapConnection(req);
       const concurrency = Number(req.body.concurrency);
       if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error('Workers must be a whole number from 1 to 8.');
       if (!['true', 'false'].includes(req.body.headless)) throw new Error('Choose visible Chrome or headless mode.');
       let ids;
       try { ids = JSON.parse(req.body.registrationIds); } catch { throw new Error('Select saved registrations.'); }
-      const proxies = parseProxies(req.file.buffer.toString('utf8'));
       accounts = registrationAssistant.accountsForBatch(ids);
-      res.status(202).json(await runner.start({ accounts, proxies, concurrency, headless: req.body.headless === 'true' }));
+      res.status(202).json(await runner.start({ accounts, ...connection, concurrency, headless: req.body.headless === 'true' }));
     } catch (error) {
       // runner.start takes ownership of credentials only after a successful start.
       if (accounts) for (const account of accounts) account.password = '';
       res.status(400).json({ error: error.message });
     } finally { req.file?.buffer.fill(0); }
   });
-  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 2, fields: 2, parts: 4, fieldSize: 100 } });
+  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 2, fields: 3, parts: 5, fieldSize: 100 } });
   app.post("/api/runs", (req, res, next) => {
     if (runner.run?.active) return res.status(409).json({ error: "A batch is already running." });
     next();
   }, upload.fields([{ name: "accounts", maxCount: 1 }, { name: "proxies", maxCount: 1 }]), async (req, res) => {
-    let accounts, proxies;
+    let accounts;
     try {
-      if (!req.files?.accounts?.[0] || !req.files?.proxies?.[0]) throw new Error("Choose both account and proxy TXT files.");
+      if (!req.files?.accounts?.[0]) throw new Error("Choose an account TXT file.");
       accounts = parseAccounts(req.files.accounts[0].buffer.toString("utf8"));
-      proxies = parseProxies(req.files.proxies[0].buffer.toString("utf8"));
+      const connection = imapConnection(req);
       const concurrency = Number(req.body.concurrency);
       if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error("Parallel tasks must be a whole number from 1 to 8.");
       if (!["true", "false"].includes(req.body.headless)) throw new Error("Choose visible Chrome or headless mode.");
-      const state = await runner.start({ accounts, proxies, concurrency, headless: req.body.headless === "true" });
+      const state = await runner.start({ accounts, ...connection, concurrency, headless: req.body.headless === "true" });
       res.status(202).json(state);
-    } catch (error) { res.status(400).json({ error: error.message }); }
+    } catch (error) {
+      if (accounts) for (const account of accounts) account.password = '';
+      res.status(400).json({ error: error.message });
+    }
     finally { for (const file of Object.values(req.files || {}).flat()) file.buffer.fill(0); }
   });
   app.post("/api/runs/:id/stop", (req, res) => {
@@ -122,6 +131,7 @@ if (require.main === module) {
   server.on("error", (error) => { 
     console.error(error.code === "EADDRINUSE" ? `Port ${port} is already in use. Set PORT to another port.` : "Could not start the dashboard server."); 
     process.exitCode = 1; 
+    void registrationAssistant.close().catch(() => {});
   });
 
   const shutdown = async () => {

@@ -31,6 +31,26 @@ const registrationStopButton = document.getElementById("registration-batch-stop"
 let recordsVersion = null, recordsRequest = 0, recordRows = [], batchState = null, batchSubmitting = false;
 const selectedRecords = new Set(), revealedPasswords = new Map();
 
+function renderPhonePool() {
+  const provider = latestSnapshot?.phoneProvider;
+  const notice = document.getElementById('registration-sms-provider');
+  notice.hidden = !provider?.paused;
+  if (provider?.paused) {
+    const seconds = Math.max(0, Math.ceil((provider.retryAt - Date.now()) / 1000));
+    notice.textContent = `SMS provider paused (${provider.code}). No new numbers will be allocated. ${seconds ? `Health check in ${seconds}s.` : 'Checking provider availability…'}`;
+  }
+  const numbers = latestSnapshot?.phoneNumbers || [];
+  const list = document.getElementById('registration-phone-pool');
+  list.replaceChildren(...(numbers.length ? numbers.map(number => {
+    const item = document.createElement('li');
+    const seconds = Math.max(0, Math.ceil((number.expiresAt - Date.now()) / 1000));
+    const status = seconds ? number.status : 'expired';
+    item.textContent = `${number.phoneHint} · ${seconds ? number.uses : 3}/3 · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} remaining · ${status}`;
+    return item;
+  }) : [Object.assign(document.createElement('li'), { textContent: 'No SMS numbers acquired yet.' })]));
+}
+setInterval(renderPhonePool, 1000);
+
 function showToast(msg) {
   toast.textContent = msg;
   toast.hidden = false;
@@ -196,6 +216,7 @@ closeBtn.addEventListener("click", async () => {
 function updateUI(snapshot) {
   if (!snapshot) return;
   latestSnapshot = snapshot;
+  renderPhonePool();
   registrationRun = snapshot.run || null;
   let active = snapshot.active;
   let selectedJob = null;
@@ -408,9 +429,12 @@ function updateBatchControls() {
   all.disabled = !eligible.length;
   document.getElementById("selected-count").textContent = `${selectedRecords.size} selected`;
   const busy = batchSubmitting || !!batchState?.active;
-  document.getElementById("saved-batch-start").disabled = busy || !selectedRecords.size || !document.getElementById("saved-proxies").files.length;
+  const maskify = document.getElementById("saved-connection").value === "maskify";
+  document.getElementById("saved-proxy-field").hidden = maskify;
+  document.getElementById("saved-proxies").required = !maskify;
+  document.getElementById("saved-batch-start").disabled = busy || !selectedRecords.size || (!maskify && !document.getElementById("saved-proxies").files.length);
   document.getElementById("saved-batch-start").textContent = batchSubmitting ? "Starting…" : batchState?.active ? "Batch running" : "Run IMAP / POP3";
-  for (const id of ["saved-proxies", "saved-workers", "saved-browser"]) document.getElementById(id).disabled = busy;
+  for (const id of ["saved-connection", "saved-proxies", "saved-workers", "saved-browser"]) document.getElementById(id).disabled = busy || (id === "saved-proxies" && maskify);
   document.getElementById("saved-batch-stop").hidden = !batchState?.active;
   document.getElementById("saved-batch-stop").disabled = !!batchState?.stopping;
 }
@@ -449,13 +473,14 @@ recordList.addEventListener("click", async event => {
 });
 document.getElementById("records-refresh").addEventListener("click", () => refreshRecords());
 document.getElementById("saved-proxies").addEventListener("change", updateBatchControls);
+document.getElementById("saved-connection").addEventListener("change", updateBatchControls);
 document.getElementById("saved-batch-form").addEventListener("submit", async event => {
   event.preventDefault();
   if (batchSubmitting || batchState?.active || !selectedRecords.size) return;
   const file = document.getElementById("saved-proxies").files[0];
   const errorEl = document.getElementById("saved-batch-error");
   errorEl.hidden = true;
-  if (!file || file.size > 2 * 1024 * 1024) { errorEl.textContent = "Choose a proxy TXT file up to 2 MB."; errorEl.hidden = false; return; }
+  if (document.getElementById("saved-connection").value === "proxy" && (!file || file.size > 2 * 1024 * 1024)) { errorEl.textContent = "Choose a proxy TXT file up to 2 MB."; errorEl.hidden = false; return; }
   const data = new FormData(event.target);
   data.append("registrationIds", JSON.stringify([...selectedRecords]));
   batchSubmitting = true; updateBatchControls();

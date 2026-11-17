@@ -191,13 +191,15 @@ function generateGender() {
 // PURCHASE GERMAN NUMBER FROM HERO SMS
 // ==========================================
 
-async function getGermanNumber() {
+async function getGermanNumber({ signal } = {}) {
   let paymentRejected = false;
   for (const operator of OPERATORS) {
+    signal?.throwIfAborted();
     let result;
     try {
-      result = await heroSMS('getNumberV2', { country: COUNTRY_ID, service: SERVICE_CODE, operator: operator.code });
+      result = await heroSMS('getNumberV2', { country: COUNTRY_ID, service: SERVICE_CODE, operator: operator.code }, { signal });
     } catch (error) {
+      signal?.throwIfAborted();
       // An explicit refusal has not allocated a number. A network failure or
       // lost purchase response is uncertain, so never try another purchase.
       if (error.httpStatus === 402 || PAYMENT_CODES.has(error.providerCode)) { paymentRejected = true; continue; }
@@ -208,7 +210,7 @@ async function getGermanNumber() {
     if (responseCode === 'NO_NUMBERS') continue;
     if (PAYMENT_CODES.has(responseCode)) { paymentRejected = true; continue; }
     if (!result || typeof result !== 'object' || !result.phoneNumber || !result.activationId) {
-      throw new Error(`HeroSMS did not return a valid ${operator.name} number for GMX.`);
+      throw Object.assign(new Error(`HeroSMS did not return a valid ${operator.name} number for GMX.`), { code: /^[A-Z_]+$/.test(responseCode || '') ? responseCode : 'PHONE_ACTIVATION_INVALID' });
     }
     console.log(`[HeroSMS] German ${operator.name} number acquired for GMX.`);
     return {
@@ -221,6 +223,7 @@ async function getGermanNumber() {
       currency: result.currency ?? null,
       activationTime: result.activationTime ?? null,
       activationEndTime: result.activationEndTime ?? null,
+      canGetAnotherSms: result.canGetAnotherSms,
     };
   }
   if (paymentRejected) throw Object.assign(new Error('HeroSMS rejected payment for the available Lycamobile / Ortel Mobile numbers (HTTP_402 / NO_BALANCE). Check your balance and operator pricing in HeroSMS.'), { code: 'HEROSMS_PAYMENT_REQUIRED' });
@@ -280,6 +283,23 @@ async function getSMS(activationId, { signal } = {}) {
     otp: null,
     rawStatus: response
   };
+}
+
+async function requestNextSms(activationId, { signal } = {}) {
+  const result = await heroSMS('setStatus', { id: activationId, status: 3 }, { signal });
+  if (result !== 'ACCESS_RETRY_GET') {
+    throw Object.assign(new Error('HeroSMS did not confirm that the activation can receive another SMS.'), { code: typeof result === 'string' && /^[A-Z_]+$/.test(result) ? result : 'SMS_RESET_FAILED' });
+  }
+}
+
+async function checkSmsProvider({ signal } = {}) {
+  const result = await heroSMS('getBalance', {}, { signal });
+  const balance = typeof result === 'string' && result.startsWith('ACCESS_BALANCE:') ? Number(result.slice(15)) : Number(result?.balance);
+  if (!Number.isFinite(balance) || balance <= 0) {
+    throw Object.assign(new Error('HeroSMS is unavailable or has insufficient balance.'), {
+      code: balance <= 0 ? 'NO_BALANCE' : typeof result === 'string' && /^[A-Z_]+$/.test(result) ? result : 'SMS_PROVIDER_UNAVAILABLE',
+    });
+  }
 }
 
 // ==========================================
@@ -434,6 +454,8 @@ module.exports = {
   generatePerson,
   getGermanNumber,
   getSMS,
+  requestNextSms,
+  checkSmsProvider,
   waitForSMS,
   heroSMS
 };
