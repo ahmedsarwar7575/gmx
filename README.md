@@ -65,15 +65,17 @@ Mobile first, then Lycamobile only after an explicit stock or payment rejection.
 Uncertain purchase failures are not automatically retried. SMS reads reuse the
 same activation; manual phone and code entry remain available.
 
-Only a top-level redirect to `https://bap.navigator.gmx.net/mail` (or `/mail/`)
-confirms registration success. Query strings may change; session IDs are not
+Only a top-level HTTPS redirect to `/mail` (or `/mail/`) on `navigator.gmx.net`
+or one of its subdomains confirms registration success. This includes
+`https://navigator.gmx.net/mail` and `https://bap.navigator.gmx.net/mail`.
+Query strings may change; session IDs are not
 recorded in completion logs. OTP submission, **Perfekt!**, the old registration
 success marker and the generic `gmx.net/mail` page do not mark success or close
-the browser. The assistant keeps watching for the BAP mailbox redirect. Errors
+the browser. The assistant keeps watching for the GMX Navigator mailbox redirect. Errors
 on the final screen keep the browser open with an attention message.
 
 Manual completion is disabled. TXT exports and saved-account automation require
-a recorded BAP mailbox redirect. Older screenshot-based, manually confirmed or
+a recorded GMX Navigator mailbox redirect. Older screenshot-based, manually confirmed or
 otherwise unverified records remain saved and are displayed as **unverified**;
 they are excluded from success exports and saved-account selection.
 

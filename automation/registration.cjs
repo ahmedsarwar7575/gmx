@@ -48,7 +48,8 @@ function emailHint(value) {
 function isMailboxUrl(value) {
   try {
     const url = new URL(value);
-    return url.origin === 'https://bap.navigator.gmx.net'
+    return url.protocol === 'https:' && !url.port
+      && (url.hostname === 'navigator.gmx.net' || url.hostname.endsWith('.navigator.gmx.net'))
       && ['/mail', '/mail/'].includes(url.pathname);
   } catch { return false; }
 }
@@ -62,7 +63,8 @@ function isRegistrationHelpUrl(value) {
 
 function isVerifiedRegistration(record) {
   return record?.status === 'complete' && record.completionSource === 'mailbox_redirect'
-    && record.completionOrigin === 'https://bap.navigator.gmx.net';
+    && typeof record.completionOrigin === 'string' && isMailboxUrl(`${record.completionOrigin}/mail`)
+    && new URL(record.completionOrigin).origin === record.completionOrigin;
 }
 
 
@@ -1349,13 +1351,14 @@ class RegistrationAssistant extends EventEmitter {
   }
 
   finishRegistration(view) {
-    if (!view.mailboxRedirect || !isMailboxUrl(view.page?.url())) throw new Error('A verified BAP mailbox redirect is required before marking success.');
+    const mailboxUrl = view.page?.url();
+    if (!view.mailboxRedirect || !isMailboxUrl(mailboxUrl)) throw new Error('A verified GMX Navigator mailbox redirect is required before marking success.');
     const email = /@gmx\.de$/i.test(view.email || '') ? view.email : null;
-    const verification = { completionSource: 'mailbox_redirect', completionOrigin: 'https://bap.navigator.gmx.net' };
+    const verification = { completionSource: 'mailbox_redirect', completionOrigin: new URL(mailboxUrl).origin };
     this.store.update(this.activeId, { completedAt: Date.now(), ...verification, ...(email ? { email } : {}) });
     this.state = { ...this.state, ...verification };
     if (email) this.state = { ...this.state, emailHint: emailHint(email) };
-    this.setState('complete', 'Verified BAP mailbox redirect · account creation complete', 'confirmation');
+    this.setState('complete', 'Verified GMX Navigator mailbox redirect · account creation complete', 'confirmation');
   }
 
   async handleSmsTimeout(poll) {
@@ -1519,8 +1522,8 @@ class RegistrationAssistant extends EventEmitter {
     if (view.success) { this.finishRegistration(view); return; }
 
     if (view.summaryPage) {
-      if (view.errors.length) { this.setState('needs_attention', `GMX needs attention: ${this.safeError(view.errors[0])} · waiting for the BAP mailbox redirect`, 'confirmation'); return; }
-      if (!view.next) { this.setState('running', 'Waiting for the verified BAP mailbox redirect', 'confirmation'); return; }
+      if (view.errors.length) { this.setState('needs_attention', `GMX needs attention: ${this.safeError(view.errors[0])} · waiting for the GMX Navigator mailbox redirect`, 'confirmation'); return; }
+      if (!view.next) { this.setState('running', 'Waiting for the verified GMX Navigator mailbox redirect', 'confirmation'); return; }
     }
 
     if (view.key !== this.currentKey) {
@@ -1723,7 +1726,7 @@ class RegistrationAssistant extends EventEmitter {
 
       if (!isVerifiedRegistration(record) || !/^[^\s@]+@gmx\.de$/i.test(record.email || '') || !record.password) {
 
-        throw new Error('Only registrations with a verified BAP mailbox redirect and saved GMX credentials can run IMAP / POP3.');
+        throw new Error('Only registrations with a verified GMX Navigator mailbox redirect and saved GMX credentials can run IMAP / POP3.');
 
       }
 

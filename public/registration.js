@@ -345,7 +345,7 @@ function renderRecords() {
     checkbox.type = "checkbox"; checkbox.dataset.recordId = record.id;
     checkbox.checked = selectedRecords.has(record.id); checkbox.disabled = !record.eligible;
     checkbox.setAttribute("aria-label", `Select ${record.email || record.emailHint}`);
-    if (!record.eligible) checkbox.title = "Available after a verified BAP mailbox redirect";
+    if (!record.eligible) checkbox.title = "Available after a verified GMX Navigator mailbox redirect";
     selection.append(checkbox);
     const email = tableNode("td", "record-email", record.email || record.emailHint || "—");
     const passwordCell = tableNode("td"), passwordWrap = tableNode("div", "record-password");
