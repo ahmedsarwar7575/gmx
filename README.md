@@ -65,9 +65,23 @@ Mobile first, then Lycamobile only after an explicit stock or payment rejection.
 Uncertain purchase failures are not automatically retried. SMS reads reuse the
 same activation; manual phone and code entry remain available.
 
-Reaching `https://gmx.net/mail` or `https://www.gmx.net/mail` also confirms
-registration success; changing query strings do not affect detection. The existing
-successful-registration marker remains supported.
+Reaching `/mail` on `https://gmx.net`, `https://www.gmx.net`, or
+`https://bap.navigator.gmx.net` confirms registration success; changing query
+strings do not affect detection. Session IDs are not recorded in completion logs.
+The existing successful-registration marker remains supported.
+
+The final **Perfekt!** screen with a GMX email, FreeMail benefits and contract
+summary also counts toward the batch's success total, as requested. That screen
+is saved as `user_confirmed` with completion source `accepted_summary`, including
+when GMX displays an error opening the mailbox. Its saved email and password are
+included in the TXT export; its stage says mailbox access is unverified.
+
+If the HeroSMS code wait expires, the assistant clicks GMX's enabled
+`resend-code-button` once and resumes checking the same activation and number.
+There is at most one automatic resend per account. Disabled, missing or
+CAPTCHA-blocked buttons leave manual entry and **Check SMS again** available.
+A failed or uncertain resend click is never repeated automatically. Network read
+failures alone do not request another SMS or buy another number.
 
 Phone numbers are normalized and reserved in the database before submission.
 HeroSMS numbers already assigned to another registration are rejected without an
@@ -76,6 +90,19 @@ existing activation. Reservations cover parallel workers and survive restarts;
 existing saved phone numbers are included when the database opens. Failed and
 cancelled attempts retain their number reservations. Manual phone entry uses
 the same duplicate check.
+
+Chrome uses an isolated profile with address/payment autofill and password saving
+disabled. Its native browser identity is preserved. All HTTP/HTTPS destinations
+use the selected proxy, including Chrome's usual loopback bypass. QUIC is disabled
+and WebRTC non-proxied UDP is disabled; DNS prefetch and background networking
+remain disabled. The browser has no direct fallback when the proxy fails.
+Geolocation, microphone, camera and notification permissions are denied by
+default. Exit-IP verification and permanent uniqueness reservations still run
+before visiting GMX. Use a static or sticky exit throughout each registration.
+
+These browser settings do not enforce networking for other processes or the
+operating system. A system firewall or isolated network environment is required
+for a strict machine-wide guarantee that traffic can leave only through a proxy.
 
 Failed attempts are reported separately. The batch runs the requested number
 of attempts without creating replacement accounts automatically. **Stop batch**

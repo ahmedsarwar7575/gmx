@@ -108,7 +108,7 @@ class RegistrationBatchRunner extends EventEmitter {
       await worker.start(profile, { mode: run.connectionMode, ...(proxyText ? { proxyText } : {}) });
       await this.waitForAccount(worker, signal);
       if (!['complete', 'user_confirmed'].includes(worker.state?.status)) throw new Error('Registration did not complete.');
-      job.status = 'success'; job.stage = 'Account created';
+      job.status = 'success'; job.stage = worker.state.stage || 'Account created';
     } catch (error) {
       job.status = this.controller.signal.aborted ? 'cancelled' : 'failed';
       job.stage = this.controller.signal.aborted ? 'Stopped by user' : timeout.signal.aborted
@@ -118,7 +118,7 @@ class RegistrationBatchRunner extends EventEmitter {
       }
       // A stop can race with the site's final success marker. Keep confirmed
       // successes in the result and export even when stopping the other jobs.
-      if (['complete', 'user_confirmed'].includes(worker?.state?.status)) { job.status = 'success'; job.stage = 'Account created'; }
+      if (['complete', 'user_confirmed'].includes(worker?.state?.status)) { job.status = 'success'; job.stage = worker.state.stage || 'Account created'; }
     } finally {
       clearTimeout(deadline);
       if (worker) {

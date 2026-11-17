@@ -48,7 +48,7 @@ function emailHint(value) {
 function isMailboxUrl(value) {
   try {
     const url = new URL(value);
-    return ['https://gmx.net', 'https://www.gmx.net'].includes(url.origin)
+    return ['https://gmx.net', 'https://www.gmx.net', 'https://bap.navigator.gmx.net'].includes(url.origin)
       && ['/mail', '/mail/'].includes(url.pathname);
   } catch { return false; }
 }
@@ -440,13 +440,29 @@ const dom = (() => {
 
       const displayed = all.find(el => el.matches('.congrats__email') && visible(el));
 
-      const email = displayed?.textContent?.trim() || (alias?.value && domain?.value ? `${alias.value}@${domain.value.replace(/^@/, '')}` : null);
+      let email = displayed?.textContent?.trim() || (alias?.value && domain?.value ? `${alias.value}@${domain.value.replace(/^@/, '')}` : null);
 
       const next = all.find(el => el.matches('button[data-testid="next-button"]') && visible(el))
 
         || all.find(el => el.matches('button[type="submit"]') && visible(el) && /^(get started|continue|next|weiter|verify|confirm|create (your )?account|i agree.*)$/i.test(el.textContent.trim()));
 
-      const success = all.some(el => el.id === 'terms_and_conditions_successful_registration' && visible(el));
+      const successMarker = all.some(el => el.id === 'terms_and_conditions_successful_registration' && visible(el));
+
+      const visibleText = roots.flatMap(root => {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), texts = [];
+        let node;
+        while ((node = walker.nextNode())) if (node.parentElement && visible(node.parentElement)) texts.push(node.textContent.trim());
+        return texts;
+      }).join(' ');
+      const summaryEmails = [...new Set((visibleText.match(/[A-Z0-9._%+-]+@gmx\.de\b/gi) || []).map(value => value.toLowerCase()))];
+      const finalHeading = all.some(el => visible(el) && el.matches('h1,h2,h3,[role="heading"]') && /^Perfekt\s*!?$/i.test(el.textContent.trim()));
+      // This is the user's accepted final screen, even when GMX reports a
+      // mailbox handoff error. Keep it distinct from verified completion.
+      const acceptedSummary = finalHeading && summaryEmails.length === 1 && /GMX\s*FreeMail/i.test(visibleText)
+        && /E-Mail\s*:/i.test(visibleText) && /Cloud\s*:/i.test(visibleText) && /News\s*:/i.test(visibleText)
+        && /Vertragszusammenfassung|Zustimmen\s+und\s+weiter/i.test(visibleText);
+      if (acceptedSummary) email = summaryEmails[0];
+      const success = successMarker || acceptedSummary;
 
       const errors = all.filter(el => visible(el) && (el.matches('[role="alert"],[id$="-error"]'))).map(el => el.textContent.trim()).filter(Boolean);
 
@@ -456,7 +472,7 @@ const dom = (() => {
 
         wrongDomain: !!email && !/@gmx\.de$/i.test(email), aliasAvailable: !!alias?.classList.contains('alias-step__form-element--available'),
 
-        success, errors, next: !!next, nextDisabled: !next || next.disabled || next.getAttribute('aria-busy') === 'true',
+        success, acceptedSummary: acceptedSummary && !successMarker, errors, next: !!next, nextDisabled: !next || next.disabled || next.getAttribute('aria-busy') === 'true',
 
         suggestionCount: all.filter(el => el.matches('button.chip[data-testid^="chip-"]') && visible(el)).length,
 
@@ -770,7 +786,7 @@ class RegistrationAssistant extends EventEmitter {
 
         phoneApproved: !!profile.phone, phonePurchaseStatus: profile.phone ? 'provided' : 'idle', failures: 0, unknownSince: null, manualCaptcha: null, stopped: false,
 
-        smsController: new AbortController(), exitIpReserved: false,
+        smsController: new AbortController(), exitIpReserved: false, smsResendAttempted: false,
 
         smsPoll: profile.heroSMS ? { activationId: profile.heroSMS.activationId, deadline: null, nextAt: 0, finished: false, retryable: false, providerStatus: null } : null,
 
@@ -845,6 +861,15 @@ class RegistrationAssistant extends EventEmitter {
 
       fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
 
+      const profileDirectory = path.join(userDataDir, 'Default');
+      fs.mkdirSync(profileDirectory, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(profileDirectory, 'Preferences'), JSON.stringify({
+        credentials_enable_service: false, credentials_enable_autosignin: false,
+        autofill: { profile_enabled: false, credit_card_enabled: false },
+        webrtc: { ip_handling_policy: 'disable_non_proxied_udp' },
+        profile: { default_content_setting_values: { geolocation: 2, media_stream_camera: 2, media_stream_mic: 2, notifications: 2 } },
+      }), { flag: 'wx', mode: 0o600 });
+
       this.browser = await this.launch({
 
         headless: false,
@@ -866,6 +891,10 @@ class RegistrationAssistant extends EventEmitter {
           '--dns-prefetch-disable',
 
           '--disable-background-networking',
+
+          '--disable-quic',
+
+          '--proxy-bypass-list=<-loopback>',
 
           ...(proxyArg ? [proxyArg] : []),
 
@@ -1278,6 +1307,50 @@ class RegistrationAssistant extends EventEmitter {
 
 
 
+  finishRegistration(view) {
+    const source = view.mailboxRedirect ? 'mailbox_redirect' : view.acceptedSummary ? 'accepted_summary' : 'success_marker';
+    const email = /@gmx\.de$/i.test(view.email || '') ? view.email : null;
+    this.store.update(this.activeId, { completedAt: Date.now(), completionSource: source, ...(email ? { email } : {}) });
+    if (email) this.state = { ...this.state, emailHint: emailHint(email) };
+    this.setState(view.acceptedSummary ? 'user_confirmed' : 'complete', view.mailboxRedirect
+      ? 'GMX opened the mailbox · account creation complete' : view.acceptedSummary
+        ? 'Accepted final registration screen reached · mailbox access unverified'
+        : 'GMX confirmed successful account creation', 'confirmation');
+  }
+
+  async handleSmsTimeout(poll) {
+    if (this.stopped || this.smsPoll !== poll || !this.browser?.connected || this.pendingCode || this.otpReady) return;
+    poll.finished = true; poll.retryable = true;
+    if (!this.smsResendAttempted) {
+      let buttons = [];
+      try {
+        const view = await dom.scan(this.browser);
+        if (this.stopped || this.smsPoll !== poll || this.pendingCode || this.otpReady) return;
+        if (view?.success) { this.finishRegistration(view); return; }
+        if (view?.phase === 'otp' && !view.captcha) {
+          buttons = await dom.nodes(view.frame, 'button[data-testid="resend-code-button"]');
+          for (const button of buttons) {
+            if (!await button.evaluate(el => !el.disabled && !el.matches(':disabled') && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-busy') !== 'true')) continue;
+            if (this.stopped || this.smsPoll !== poll || this.pendingCode || this.otpReady || this.smsController?.signal.aborted) return;
+            // Mark before clicking: a lost response must never replay an SMS
+            // request. The number and HeroSMS activation remain unchanged.
+            this.smsResendAttempted = true;
+            await button.click();
+            if (this.stopped || this.smsPoll !== poll || this.pendingCode || this.otpReady) return;
+            Object.assign(poll, { deadline: Date.now() + this.smsTimeoutMs, nextAt: 0, finished: false, retryable: false, providerStatus: null });
+            this.addLog('Requested one SMS resend in GMX · checking the same HeroSMS activation again.');
+            this.setState('awaiting_otp', 'SMS code requested again · waiting for the same number', 'otp');
+            return;
+          }
+        }
+      } catch {
+        if (this.stopped || this.pendingCode || this.otpReady) return;
+        this.addLog(this.smsResendAttempted ? 'The SMS resend click could not be confirmed. It will not be repeated automatically.' : 'The SMS resend button could not be checked. Manual entry remains available.');
+      } finally { await Promise.all(buttons.map(button => button.dispose().catch(() => {}))); }
+    }
+    this.setState('awaiting_otp', 'HeroSMS code wait timed out · click Check SMS again or enter the code manually', 'otp');
+  }
+
   async pollSms() {
 
     const poll = this.smsPoll;
@@ -1294,9 +1367,7 @@ class RegistrationAssistant extends EventEmitter {
 
     if (Date.now() >= poll.deadline) {
 
-      poll.finished = true; poll.retryable = true;
-
-      this.setState('awaiting_otp', 'HeroSMS code wait timed out · click Check SMS again or enter the code manually', 'otp');
+      await this.handleSmsTimeout(poll);
 
       return;
 
@@ -1322,11 +1393,9 @@ class RegistrationAssistant extends EventEmitter {
 
       if (this.stopped || signal.aborted || !this.browser?.connected || this.smsPoll !== poll || this.state.status !== 'awaiting_otp' || this.pendingCode || this.otpReady) return;
 
-      if (Date.now() >= poll.deadline) {
+      if (Date.now() >= poll.deadline && sms?.status !== 'RECEIVED') {
 
-        poll.finished = true; poll.retryable = true;
-
-        this.setState('awaiting_otp', 'HeroSMS code wait timed out · click Check SMS again or enter the code manually', 'otp');
+        await this.handleSmsTimeout(poll);
 
         return;
 
@@ -1370,13 +1439,11 @@ class RegistrationAssistant extends EventEmitter {
 
       if (this.stopped || signal.aborted) return;
 
+      if (Date.now() >= poll.deadline) { await this.handleSmsTimeout(poll); return; }
+
       poll.finished = true; poll.retryable = true;
 
-      this.setState('awaiting_otp', Date.now() >= poll.deadline
-
-        ? 'HeroSMS code wait timed out · click Check SMS again or enter the code manually'
-
-        : 'Could not retrieve the HeroSMS code · click Check SMS again or enter it manually', 'otp');
+      this.setState('awaiting_otp', 'Could not retrieve the HeroSMS code · click Check SMS again or enter it manually', 'otp');
 
     }
 
@@ -1406,11 +1473,7 @@ class RegistrationAssistant extends EventEmitter {
 
     }
 
-    if (view.success) {
-      this.store.update(this.activeId, { completedAt: Date.now(), completionSource: view.mailboxRedirect ? 'mailbox_redirect' : 'success_marker' });
-      this.setState('complete', view.mailboxRedirect ? 'GMX opened the mailbox · account creation complete' : 'GMX confirmed successful account creation', 'confirmation');
-      return;
-    }
+    if (view.success) { this.finishRegistration(view); return; }
 
     if (view.key !== this.currentKey) {
 
