@@ -27,9 +27,10 @@
                 <label><input type="radio" name="connectionMode" value="proxy"><span>HTTP proxy</span></label>
               </div>
               <p id="connection-help">Uses your configured Maskify connection.</p>
-              <label id="registration-proxy-field" class="registration-proxy-field" hidden>Proxy TXT<input id="registration-proxy-file" name="proxies" type="file" accept=".txt,text/plain" disabled><span>One proxy per line · Max 2 MB · host:port:user:password or HTTP/HTTPS URL. Supply at least one different proxy per account.</span></label>
+              <label id="registration-proxy-field" class="registration-proxy-field" hidden>Proxy TXT<input id="registration-proxy-file" name="proxies" type="file" accept=".txt,text/plain" disabled><span>One proxy per line · Max 2 MB · host:port:user:password or HTTP/HTTPS URL. Supply one different proxy per account plus extras for retries.</span></label>
               <div class="registration-batch-inputs"><label>Accounts<input id="registration-account-count" name="accountCount" type="number" min="1" max="500" step="1" value="10" required></label><label>Parallel workers<input id="registration-workers" name="concurrency" type="number" min="1" max="8" step="1" value="2" required></label></div>
               <p>Each account uses a verified, unused exit IP. Repeated or unverified IPs stop that attempt.</p>
+              <p>After the initial batch finishes, failed accounts get up to 3 retries in account order. Each retry uses a new phone number when it reaches SMS verification.</p>
             </fieldset>
             <div class="registration-actions"><button id="registration-start" class="button button-primary" type="submit"><span id="registration-spinner" class="spinner" hidden></span><span id="registration-start-label">Start batch</span><svg id="registration-arrow" class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button><span id="registration-message" role="status">One Chrome window per active worker.</span></div>
             <p id="registration-error" class="form-error" role="alert" hidden></p>

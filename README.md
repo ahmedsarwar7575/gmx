@@ -42,15 +42,22 @@ Chrome window or use the dashboard's phone and SMS controls.
 
 1. Open **Registration** and choose **Maskify API** or **HTTP proxy**.
 2. In HTTP proxy mode, upload a proxy TXT file up to **2 MB**, with at least one
-   distinct proxy entry per requested account.
+   distinct proxy entry per requested account. Include extra unused proxies for
+   retries; each retry consumes another entry. With no spare proxies, failed
+   accounts remain failed and the dashboard explains why their retries were skipped.
 3. Choose **1–500 accounts** and **1–8 parallel workers**, then click **Start batch**.
 4. Follow progress and select an account session to provide any manual inputs.
+   After all initial attempts finish and their browsers close, failed accounts
+   retry one at a time in account order, for up to **3 retry rounds** (4 total
+   attempts per account). For example, failures at #3 and #7 retry as #3 then #7
+   after #10 finishes. Successful accounts are never retried; later rounds include
+   only accounts still failing. The dashboard shows the retry round and attempt.
 5. When the batch finishes, the dashboard downloads a TXT file containing one
    `email:password` line per completed account. Use **Download email:password TXT**
    to save another copy.
 
 Direct registration connections are disabled. Maskify creates a separate German
-sticky session per account. Each uploaded proxy entry is used once, including
+sticky session per attempt, including retries. Each uploaded proxy entry is used once, including
 failed attempts; use static or sticky proxies that retain their exit IP.
 
 Before visiting GMX, each browser verifies its exit IP and atomically reserves it
@@ -62,8 +69,12 @@ Each account gets its own Chrome profile. The assistant generates account
 details, fills recognized GMX forms and advances through registration. A phone
 number is purchased only after the phone form is reached. HeroSMS tries Lycamobile
 first, then Ortel Mobile only after an explicit stock or payment rejection.
-Uncertain purchase failures are not automatically retried. SMS reads reuse the
-same activation; manual phone and code entry remain available.
+Uncertain purchase requests are not automatically replayed. SMS reads reuse the
+same activation within an attempt; manual phone and code entry remain available.
+Each registration retry uses a fresh browser and saved registration record,
+keeps the account profile and chosen email/password, and clears the old phone
+and activation. A new phone is purchased only if the retry reaches the phone form.
+Previously reserved phone numbers and exit IPs cannot be reused.
 
 Only a top-level HTTPS redirect to `/mail` (or `/mail/`) on `navigator.gmx.net`
 or one of its subdomains confirms registration success. This includes
@@ -83,8 +94,9 @@ they are excluded from success exports and saved-account selection.
 
 If any tab reaches `https://hilfe.gmx.net/kundenservice/flexreg.html`, the attempt
 fails and its browser closes. In a batch, the worker then starts the next queued
-registration while other workers continue. The failed attempt is not retried
-and no extra attempts are added. Reserved phone numbers and exit IPs remain reserved.
+registration while other workers continue. Failed accounts become eligible for
+the retry rounds after the initial batch finishes. Reserved phone numbers and
+exit IPs remain reserved.
 
 Registration logs identify the batch and account number, so parallel workers can
 be distinguished. Failed attempts include the step, a failure code and a stop
@@ -147,10 +159,11 @@ These browser settings do not enforce networking for other processes or the
 operating system. A system firewall or isolated network environment is required
 for a strict machine-wide guarantee that traffic can leave only through a proxy.
 
-Failed attempts are reported separately. The batch runs the requested number
-of attempts without creating replacement accounts automatically. **Stop batch**
-cancels active and queued attempts while keeping confirmed successes. Each
-registration has a 90-minute limit, including startup.
+Failed attempts are reported separately and their saved records and failure images
+remain available when a later retry succeeds. The batch keeps the requested
+account count while allowing up to three additional attempts for each failure.
+**Stop batch** cancels active and queued attempts, prevents further retries, and
+keeps confirmed successes. Each attempt has a 90-minute limit, including startup.
 
 Refreshing the page reconnects to the active batch. Keep the server running;
 restarting it interrupts the batch. Completed-account exports remain available

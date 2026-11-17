@@ -91,8 +91,8 @@ function updateConnectionChoice() {
   registrationProxyFile.disabled = mode !== "proxy";
   registrationProxyFile.required = mode === "proxy";
   document.getElementById("connection-help").textContent = mode === "maskify"
-    ? "Uses a separate German Maskify session for each account."
-    : "Uses each uploaded proxy once. Complete any manual verification in its Chrome window.";
+    ? "Uses a separate German Maskify session for each attempt, including retries."
+    : "Uses each uploaded proxy once. Include extra unused proxies for failed-account retries.";
 }
 form.querySelectorAll('[name="connectionMode"]').forEach(input => input.addEventListener("change", updateConnectionChoice));
 updateConnectionChoice();
@@ -104,7 +104,10 @@ function updateRegistrationControls() {
   spinner.hidden = !registrationSubmitting;
   document.getElementById("registration-start-label").textContent = registrationSubmitting ? "Starting…" : registrationRun?.active ? "Batch running" : "Start batch";
   messageEl.textContent = registrationSubmitting ? "Preparing registration…" : registrationRun?.active
-    ? `${registrationRun.concurrency} parallel worker${registrationRun.concurrency === 1 ? "" : "s"}. Keep the server running.` : "One Chrome window per active worker.";
+    ? registrationRun.retryRound
+      ? `Retry round ${registrationRun.retryRound} of ${registrationRun.maxRetries}. Retrying failed accounts one at a time.`
+      : `${registrationRun.concurrency} parallel worker${registrationRun.concurrency === 1 ? "" : "s"}. Keep the server running.`
+    : "One Chrome window per active worker.";
   registrationStopButton.hidden = !registrationRun?.active;
   registrationStopButton.disabled = !!registrationRun?.stopping;
   downloadButton.hidden = !registrationRun || registrationRun.active;
@@ -201,13 +204,15 @@ function updateUI(snapshot) {
     const success = jobs.filter(job => job.status === "success").length;
     const failed = jobs.filter(job => job.status === "failed").length;
     const cancelled = jobs.filter(job => job.status === "cancelled").length;
-    document.getElementById("registration-batch-status").textContent = `${registrationRun.stopping && registrationRun.active ? "Stopping" : registrationRun.active ? "Running" : "Finished"} · ${success} created · ${failed} failed · ${cancelled} cancelled · ${success + failed + cancelled} / ${jobs.length} finished${registrationRun.error ? ` · ${registrationRun.error}` : ""}`;
+    const batchStage = registrationRun.stopping && registrationRun.active ? "Stopping" : !registrationRun.active ? "Finished"
+      : registrationRun.retryRound ? `Retry round ${registrationRun.retryRound} / ${registrationRun.maxRetries}` : "Running";
+    document.getElementById("registration-batch-status").textContent = `${batchStage} · ${success} created · ${failed} failed · ${cancelled} cancelled · ${success + failed + cancelled} / ${jobs.length} finished${registrationRun.error ? ` · ${registrationRun.error}` : ""}`;
     const sessions = jobs.filter(job => job.session || job.startedAt || job.screenshotUrl || job.artifactError);
     if (!sessions.some(job => job.id === selectedJobId)) selectedJobId = (sessions.find(job => !job.finishedAt) || sessions[0])?.id || null;
     sessionSelect.replaceChildren(...sessions.map(job => {
       const option = document.createElement("option");
       option.value = job.id;
-      option.textContent = `#${job.index} · ${job.session?.emailHint || "Profile preparation"} · ${job.status.replace(/_/g, " ")}`;
+      option.textContent = `#${job.index} · attempt ${job.attempt || 1} / ${(registrationRun.maxRetries || 0) + 1} · ${job.session?.emailHint || "Profile preparation"} · ${job.status.replace(/_/g, " ")}`;
       return option;
     }));
     sessionSelect.value = selectedJobId || "";
