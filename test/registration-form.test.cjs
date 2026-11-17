@@ -25,10 +25,13 @@ const profileHtml = reject => `<!doctype html><html><body>
       document.querySelector('#result').innerHTML='<form id="alias-step"><input id="alias" required><select id="domain"><option value="gmx.de">gmx.de</option></select></form>';`}
   };</script></body></html>`;
 
-async function fixture(t, reject = false) {
+async function fixture(t, reject = false, { setupErrors = false } = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'gmx-form-fixture-'));
   let browser, purchases = 0;
-  const assistant = new RegistrationAssistant({ directory, solverFactory: () => null,
+  const assistant = new RegistrationAssistant({ directory, solverFactory: () => setupErrors ? {
+    checkAccount: async () => {}, closeProxy: async () => {},
+    preparePage: async () => { throw new Error('Preparation failed; password=private-setup-secret'); },
+  } : null,
     maskifyEnv: { MASKIFY_USERNAME: 'fixture-user', MASKIFY_PASSWORD: 'fixture-password' },
     proxyIpCheck: async () => '192.0.2.1',
     purchasePhone: async () => { purchases++; throw new Error('SMS must not be reached in a profile test'); },
@@ -36,6 +39,9 @@ async function fixture(t, reject = false) {
       browser = await puppeteer.launch({ ...options, headless: true,
         args: [...options.args.filter(arg => !arg.startsWith('--proxy-server=')), '--no-sandbox', '--disable-dev-shm-usage'] });
       const [page] = await browser.pages();
+      if (setupErrors) page.createCDPSession = async () => ({
+        send: async () => { throw new Error('Locale failed; token=private-locale-secret'); },
+      });
       await page.setRequestInterception(true);
       page.on('request', request => {
         const body = request.url().startsWith('https://hilfe.gmx.net/')
@@ -65,6 +71,28 @@ test('real browser fixture fills and submits the first form once, then advances 
   assert.equal(purchases(), 0);
   assert.equal(assistant.smsController.signal.aborted, false);
   assert.equal(await page.$eval('#alias', element => element.value), assistant.store.get(assistant.activeId).candidateEmail.split('@')[0]);
+  await withDeadline(async () => {
+    while (!assistant.logs.some(entry => entry.message.startsWith('Fingerprint: ') && entry.message.includes('"stage":"navigation"'))) await sleep(10);
+  }, 2000);
+  const audit = assistant.logs.find(entry => entry.message.startsWith('Fingerprint: ') && entry.message.includes('"stage":"navigation"'));
+  const fingerprint = JSON.parse(audit.message.slice('Fingerprint: '.length));
+  assert.equal(fingerprint.origin, 'https://register.gmx.net');
+  assert.notEqual(fingerprint.readyState, 'loading');
+  assert.equal(fingerprint.webdriverType, 'boolean');
+});
+
+test('optional browser setup failures are redacted and do not prevent ordinary form progression', { timeout: 20000 }, async t => {
+  const { assistant, browser, purchases } = await fixture(t, false, { setupErrors: true });
+  await assistant.start(profile, { mode: 'maskify' });
+  const [page] = await browser().pages();
+  await page.waitForSelector('#alias');
+  const logs = assistant.logs.map(entry => entry.message).join('\n');
+  assert.match(logs, /Browser setup \(locale\)/);
+  assert.match(logs, /Browser setup \(verification page preparation\)/);
+  assert.doesNotMatch(logs, /private-setup-secret|private-locale-secret/);
+  assert.equal(await page.evaluate(() => window.profileSubmissions), 1);
+  assert.equal(purchases(), 0);
+  assert.equal(assistant.state.status, 'running');
 });
 
 test('real browser fixture captures the visible rejection after help navigation and closes safely', { timeout: 20000 }, async t => {

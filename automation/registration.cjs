@@ -12,10 +12,8 @@ const { isIP } = require('node:net');
 
 const { setTimeout: sleep } = require('node:timers/promises');
 
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-
-puppeteer.use(StealthPlugin());
+const { launchRegistrationBrowser, describeBrowserLaunch } = require('./browser-runtime.cjs');
+const { auditPage } = require('./browser-diagnostics.cjs');
 
 const { Router } = require('express');
 const multer = require('multer');
@@ -741,7 +739,7 @@ function validateProfile(input = {}) {
 
 class RegistrationAssistant extends EventEmitter {
 
-  constructor({ directory = path.join(PROJECT_ROOT, 'data'), launch = options => puppeteer.launch(options), pollMs = 600, transitionMs = 60_000,
+  constructor({ directory = path.join(PROJECT_ROOT, 'data'), launch = launchRegistrationBrowser, pollMs = 600, transitionMs = 60_000,
 
     maskifyEnv = null, solverFactory = createCaptchaSolver, proxyIpCheck = checkProxyIp, purchasePhone = null,
 
@@ -799,6 +797,18 @@ class RegistrationAssistant extends EventEmitter {
 
     this.printLog(message);
 
+  }
+
+  reportBrowserSetupIssue(operation, error, id = this.activeId) {
+    if (this.stopped || this.activeId !== id) return;
+    try { this.addLog(`[WARN] Browser setup (${operation}): ${this.safeError(error)}`); }
+    catch { /* Logging must not turn an optional setup failure into a registration failure. */ }
+  }
+
+  auditBrowserPage(page, stage, id = this.activeId) {
+    return auditPage(page, { stage, log: message => {
+      if (!this.stopped && this.activeId === id) this.addLog(message);
+    } });
   }
 
 
@@ -983,19 +993,6 @@ class RegistrationAssistant extends EventEmitter {
 
       this.smsController.signal.throwIfAborted();
 
-      const userDataDir = path.join(path.dirname(this.store.dbPath), 'browser-profiles', id);
-
-      fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
-
-      const profileDirectory = path.join(userDataDir, 'Default');
-      fs.mkdirSync(profileDirectory, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(path.join(profileDirectory, 'Preferences'), JSON.stringify({
-        credentials_enable_service: false, credentials_enable_autosignin: false,
-        autofill: { profile_enabled: false, credit_card_enabled: false },
-        webrtc: { ip_handling_policy: 'disable_non_proxied_udp' },
-        profile: { default_content_setting_values: { geolocation: 2, media_stream_camera: 2, media_stream_mic: 2, notifications: 2 } },
-      }), { flag: 'wx', mode: 0o600 });
-
       this.browser = await abortable(() => this.launch({
 
         headless: false,
@@ -1022,6 +1019,8 @@ class RegistrationAssistant extends EventEmitter {
 
       this.smsController.signal.throwIfAborted();
 
+      try { this.addLog(`Browser launch: ${JSON.stringify(describeBrowserLaunch(this.browser))}`); }
+      catch (error) { this.reportBrowserSetupIssue('launch diagnostics', error, id); }
 
 
       const installed = new WeakMap();
@@ -1038,13 +1037,25 @@ class RegistrationAssistant extends EventEmitter {
             }
           });
 
+          page.on('domcontentloaded', () => {
+            const url = page.url();
+            if (/^https:\/\/register\.gmx\.net(?:\/|$)/.test(url) || isMailboxUrl(url)) {
+              void this.auditBrowserPage(page, 'navigation', id);
+            }
+          });
+
           await page.setExtraHTTPHeaders({ 'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8' });
 
           if (typeof page.createCDPSession === 'function') {
 
-            const session = await page.createCDPSession().catch(() => null);
+            const session = await page.createCDPSession().catch(error => {
+              this.reportBrowserSetupIssue('CDP session', error, id);
+              return null;
+            });
 
-            if (session) await session.send('Emulation.setLocaleOverride', { locale: 'de-DE' }).catch(() => {});
+            if (session) await session.send('Emulation.setLocaleOverride', { locale: 'de-DE' }).catch(error => {
+              this.reportBrowserSetupIssue('locale', error, id);
+            });
 
           }
 
@@ -1072,7 +1083,9 @@ class RegistrationAssistant extends EventEmitter {
 
           }
 
-          await this.solver?.preparePage(page).catch(() => {});
+          await this.solver?.preparePage(page).catch(error => {
+            this.reportBrowserSetupIssue('verification page preparation', error, id);
+          });
 
         })());
 
@@ -1084,9 +1097,14 @@ class RegistrationAssistant extends EventEmitter {
 
         if (target.type() !== 'page') return;
 
-        const page = await target.page().catch(() => null);
+        const page = await target.page().catch(error => {
+          this.reportBrowserSetupIssue('new page', error, id);
+          return null;
+        });
 
-        if (page) await install(page).catch(() => {});
+        if (page) await install(page).catch(error => {
+          this.reportBrowserSetupIssue('new page preparation', error, id);
+        });
 
       });
 
@@ -1095,21 +1113,7 @@ class RegistrationAssistant extends EventEmitter {
       this.page = (await step(() => this.browser.pages()))[0] || await step(() => this.browser.newPage());
 
       await step(() => install(this.page));
-         try {
-        const fp = await this.page.evaluate(() => ({
-          ua: navigator.userAgent,
-          platform: navigator.platform,
-          languages: navigator.languages,
-          webdriver: navigator.webdriver,
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-          hardwareConcurrency: navigator.hardwareConcurrency,
-          deviceMemory: navigator.deviceMemory ?? null,
-        }));
-        this.addLog(`Fingerprint: ${JSON.stringify(fp)}`);
-        if (fp.webdriver) this.addLog('[WARN] navigator.webdriver is still truthy — stealth evasion may have failed.');
-      } catch (error) {
-        this.addLog(`Fingerprint audit failed: ${this.safeError(error)}`);
-      }
+      void this.auditBrowserPage(this.page, 'startup', id);
 
       if (proxyArg) {
 

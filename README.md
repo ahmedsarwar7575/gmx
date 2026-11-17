@@ -189,14 +189,26 @@ This covers this installation's saved history; separate installations need a
 shared history to enforce uniqueness across machines. It does not establish that
 a number has never been used by someone else.
 
-Chrome uses an isolated profile with address/payment autofill and password saving
-disabled. Its native browser identity is preserved. All HTTP/HTTPS destinations
-use the selected proxy, including Chrome's usual loopback bypass. QUIC is disabled
-and WebRTC non-proxied UDP is disabled; DNS prefetch and background networking
-remain disabled. The browser has no direct fallback when the proxy fails.
-Geolocation, microphone, camera and notification permissions are denied by
-default. Exit-IP verification and permanent uniqueness reservations still run
-before visiting GMX. Use a static or sticky exit throughout each registration.
+Chrome uses a temporary profile managed by the browser plugins. Each browser
+gets its own plugin instances so closing one worker cannot select another
+worker's profile for deletion. The application no longer writes unused
+`data/browser-profiles/<id>/Default/Preferences` files; older unused directories
+are left untouched. Those files were never passed to the browser launcher and
+did not enforce autofill, password-saving, or permission settings.
+
+All HTTP/HTTPS destinations use the selected proxy, including Chrome's usual
+loopback bypass. QUIC, DNS prefetch and background networking are disabled by
+the launch configuration. The WebRTC launch flag expresses an intended policy;
+its effect and any IP disclosure require a runtime check. The browser has no
+configured direct fallback when the proxy fails. Exit-IP verification and
+permanent uniqueness reservations still run before visiting GMX.
+
+Diagnostic logs report launch switch names without their values, plus bounded,
+read-only fingerprint observations at startup and after registration/mailbox
+document loads. `webdriverType` distinguishes an absent value from `false`;
+diagnostic failures do not stop or gate registration. Optional browser setup
+failures are logged with the existing secret redaction. These observations do
+not establish a site's detection decision or change browser identity settings.
 
 These browser settings do not enforce networking for other processes or the
 operating system. A system firewall or isolated network environment is required
