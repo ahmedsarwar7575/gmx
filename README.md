@@ -141,8 +141,11 @@ exit IPs remain reserved.
 Registration logs identify the batch and account number, so parallel workers can
 be distinguished. Failed attempts include the step, a failure code and a stop
 reason. Recent HTTP/network failures and visible GMX validation errors are
-included when observed. A help redirect without a specific GMX message is
-explicitly reported as an unknown rejection reason. Request bodies, raw response
+included when observed. Before closing a registration-help page, the assistant
+briefly waits for its visible error text and saves it in the failure reason.
+A help redirect without a readable message is reported as unknown. A cleared
+CAPTCHA overlay does not confirm that GMX accepted the registration step.
+Request bodies, raw response
 bodies, session URL queries and known credentials are not logged. Failed attempts,
 including registration-help redirects and attempts that need attention, release
 their worker for the next already queued account.

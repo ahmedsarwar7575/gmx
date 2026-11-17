@@ -24,6 +24,7 @@ const { generateProfile, getSMS, requestNextSms, checkSmsProvider } = require('.
 const { PhoneNumberPool, MAX_PHONE_USES, sharedProviderFailure } = require('./phone-pool.cjs');
 const { acquireInstanceLock } = require('../instance-lock.cjs');
 const { abortable, withDeadline, killOwnedBrowser, closeOwnedBrowser } = require('../async-control.cjs');
+const { readVisibleRegistrationErrors } = require('./registration-errors.cjs');
 
 const { createMaskifyProxy } = require('../maskify.cjs');
 
@@ -441,7 +442,7 @@ const dom = (() => {
 
   async function read(frame) {
 
-    return frame.evaluate(() => {
+    const view = await frame.evaluate(() => {
 
       const roots = [document], all = [];
 
@@ -520,6 +521,10 @@ const dom = (() => {
         forms: all.filter(el => el.tagName === 'FORM' && visible(el)).map(el => el.id) };
 
     });
+
+    const visibleErrors = await frame.evaluate(readVisibleRegistrationErrors).catch(() => []);
+    view.errors = [...new Set([...visibleErrors, ...view.errors])];
+    return view;
 
   }
 
@@ -903,7 +908,7 @@ class RegistrationAssistant extends EventEmitter {
 
         phoneApproved: !!profile.phone, phonePurchaseStatus: profile.phone ? 'provided' : 'idle', phoneLease: null, failures: 0, unknownSince: null, manualCaptcha: null, stopped: false,
 
-        smsController: new AbortController(), exitIpReserved: false, smsResendAttempted: false, lastRequestIssue: null, lastVisibleError: null, failureCapture: null,
+        smsController: new AbortController(), exitIpReserved: false, smsResendAttempted: false, lastRequestIssue: null, lastVisibleError: null, failureCapture: null, helpFailure: null,
 
         smsPoll: profile.heroSMS ? { activationId: profile.heroSMS.activationId, deadline: null, nextAt: 0, finished: false, retryable: false, providerStatus: null } : null,
 
@@ -1452,7 +1457,7 @@ class RegistrationAssistant extends EventEmitter {
 
       if (solved) { 
 
-        this.addLog('✅ CAPTCHA solved automatically! Continuing...');
+        this.addLog('CAPTCHA overlay cleared · checking whether GMX advances to the next step.');
 
         this.unknownSince = null; this.failures = 0; return; 
 
@@ -1477,17 +1482,34 @@ class RegistrationAssistant extends EventEmitter {
 
 
   async failRegistrationHelp(page = this.page) {
+    if (this.helpFailure) return this.helpFailure;
     if (!this.state || terminal.has(this.state.status)) return;
     if (page) this.page = page;
     const phase = this.submitted?.phase || this.state.phase || 'unknown';
-    const visible = this.lastVisibleError?.phase === phase && Date.now() - this.lastVisibleError.time <= 30_000 ? this.lastVisibleError.message : null;
+    let visible = this.lastVisibleError?.phase === phase && Date.now() - this.lastVisibleError.time <= 30_000 ? this.lastVisibleError.message : null;
     const issue = this.lastRequestIssue?.phase === phase && Date.now() - this.lastRequestIssue.time <= 30_000 ? this.lastRequestIssue : null;
-    const reason = `GMX redirected to registration help. ${visible ? `Last visible GMX error: ${visible}` : 'GMX did not provide a specific rejection reason.'}${issue ? ` Last observed GMX request: ${issue.method} ${issue.code}.` : ''} Attempt stopped for review.`;
-    this.recordFailure('GMX_REGISTRATION_HELP', reason, { phase });
-    this.stopped = true; clearTimeout(this.timer); this.timer = null;
-    this.smsController?.abort(new Error('GMX redirected to registration help.'));
-    // This may run inside tick(); waiting for this.work here would deadlock.
-    await this.releaseBrowser();
+    this.helpFailure = (async () => {
+      this.recordFailure('GMX_REGISTRATION_HELP', 'GMX redirected to registration help. Capturing the visible error before closing Chrome.', { phase });
+      this.stopped = true; clearTimeout(this.timer); this.timer = null;
+      this.smsController?.abort(new Error('GMX redirected to registration help.'));
+      try {
+        visible = await withDeadline(async () => {
+          if (page && !page.isClosed()) await page.waitForFunction(() => document.readyState !== 'loading' && document.body, { timeout: 1500 }).catch(() => {});
+          for (const frame of page?.frames() || []) {
+            if (!/^https:\/\/(?:register\.gmx\.net|hilfe\.gmx\.net)(?:\/|$)/.test(frame.url())) continue;
+            const errors = await frame.evaluate(readVisibleRegistrationErrors).catch(() => []);
+            if (errors[0]) return this.safeError(errors[0]);
+          }
+          return visible;
+        }, 2000);
+      } catch {}
+      if (visible) this.lastVisibleError = { phase, message: visible, time: Date.now() };
+      const reason = `GMX redirected to registration help. ${visible ? `Visible GMX error: ${visible}` : 'No specific rejection message could be read from GMX.'}${issue ? ` Last observed GMX request: ${issue.method} ${issue.code}.` : ''} Attempt stopped for review.`;
+      this.recordFailure('GMX_REGISTRATION_HELP', reason, { phase });
+      // This may run inside tick(); waiting for this.work here would deadlock.
+      await this.releaseBrowser();
+    })();
+    return this.helpFailure;
   }
 
   finishRegistration(view) {
@@ -1952,7 +1974,7 @@ class RegistrationAssistant extends EventEmitter {
 
     this.stopped = true; clearTimeout(this.timer); this.timer = null; this.smsController?.abort();
     try {
-      await withDeadline(async () => { await this.work; this.smsPoll = null; await this.releaseBrowser(); }, this.cleanupTimeoutMs);
+      await withDeadline(async () => { await this.work; await this.helpFailure; this.smsPoll = null; await this.releaseBrowser(); }, this.cleanupTimeoutMs);
     } catch (error) { this.forceClose(); throw error; }
 
   }
