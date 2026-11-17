@@ -26,6 +26,7 @@ const { createCaptchaSolver } = require('./captcha-solver.cjs');
 const { checkProxyIp } = require('../proxy-ip.cjs');
 
 const { registrationConnection } = require('../registration-connection.cjs');
+const { captureFailure } = require('../artifacts.cjs');
 
 
 
@@ -844,7 +845,7 @@ class RegistrationAssistant extends EventEmitter {
 
         phoneApproved: !!profile.phone, phonePurchaseStatus: profile.phone ? 'provided' : 'idle', failures: 0, unknownSince: null, manualCaptcha: null, stopped: false,
 
-        smsController: new AbortController(), exitIpReserved: false, smsResendAttempted: false, lastRequestIssue: null, lastVisibleError: null,
+        smsController: new AbortController(), exitIpReserved: false, smsResendAttempted: false, lastRequestIssue: null, lastVisibleError: null, failureCapture: null,
 
         smsPoll: profile.heroSMS ? { activationId: profile.heroSMS.activationId, deadline: null, nextAt: 0, finished: false, retryable: false, providerStatus: null } : null,
 
@@ -976,7 +977,7 @@ class RegistrationAssistant extends EventEmitter {
 
           page.on('framenavigated', frame => {
             if (frame === page.mainFrame() && isRegistrationHelpUrl(frame.url())) {
-              void this.failRegistrationHelp().catch(() => {});
+              void this.failRegistrationHelp(page).catch(() => {});
             }
           });
 
@@ -1101,7 +1102,7 @@ class RegistrationAssistant extends EventEmitter {
 
             const initial = await dom.scan(this.browser);
             if (initial?.registrationHelp) {
-              await this.failRegistrationHelp();
+              await this.failRegistrationHelp(initial.page);
               throw new Error('GMX redirected to registration help. The attempt was stopped.');
             }
             if (initial?.success || initial?.phase === 'profile' || initial?.summaryPage) break;
@@ -1384,8 +1385,9 @@ class RegistrationAssistant extends EventEmitter {
 
 
 
-  async failRegistrationHelp() {
+  async failRegistrationHelp(page = this.page) {
     if (!this.state || terminal.has(this.state.status)) return;
+    if (page) this.page = page;
     const phase = this.submitted?.phase || this.state.phase || 'unknown';
     const visible = this.lastVisibleError?.phase === phase && Date.now() - this.lastVisibleError.time <= 30_000 ? this.lastVisibleError.message : null;
     const issue = this.lastRequestIssue?.phase === phase && Date.now() - this.lastRequestIssue.time <= 30_000 ? this.lastRequestIssue : null;
@@ -1416,7 +1418,7 @@ class RegistrationAssistant extends EventEmitter {
       try {
         const view = await dom.scan(this.browser);
         if (this.stopped || this.smsPoll !== poll || this.pendingCode || this.otpReady) return;
-        if (view?.registrationHelp) { await this.failRegistrationHelp(); return; }
+        if (view?.registrationHelp) { await this.failRegistrationHelp(view.page); return; }
         if (view?.success) { this.finishRegistration(view); return; }
         if (view?.phase === 'otp' && !view.captcha) {
           buttons = await dom.nodes(view.frame, 'button[data-testid="resend-code-button"]');
@@ -1552,7 +1554,7 @@ class RegistrationAssistant extends EventEmitter {
 
     if (!view) return this.waitUnknown('Waiting for the GMX registration page');
 
-    if (view.registrationHelp) { await this.failRegistrationHelp(); return; }
+    if (view.registrationHelp) { await this.failRegistrationHelp(view.page); return; }
 
     if (!view.captcha) this.manualCaptcha = null;
 
@@ -1741,6 +1743,44 @@ class RegistrationAssistant extends EventEmitter {
 
   reveal(id) { const record = this.store.get(id); if (!record) throw new Error('Registration record not found.'); return { email: record.email || record.candidateEmail, password: record.password }; }
 
+  failureImage(id) {
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) return null;
+    const kind = this.store.get(id)?.failureImage?.kind;
+    if (!['screenshot', 'diagnostic'].includes(kind)) return null;
+    const filename = path.join(path.dirname(this.store.dbPath), 'registration-failures', id, kind === 'screenshot' ? 'failure.png' : 'failure.svg');
+    try { const stat = fs.lstatSync(filename); if (!stat.isFile() || stat.isSymbolicLink()) return null; } catch { return null; }
+    return { path: filename, kind };
+  }
+
+  async saveFailureImage(browser = this.browser, page = this.page) {
+    if (!this.activeId || this.state?.status === 'complete') return null;
+    if (this.failureCapture) return this.failureCapture;
+    const id = this.activeId;
+    this.failureCapture = (async () => {
+      try {
+        const record = this.store.get(id);
+        const secrets = [record?.password, record?.phone, record?.phone && `${record.phoneCountryCode}${record.phone}`,
+          record?.heroSMS?.activationId, this.maskifyEnv?.ANYSOLVER_API_KEY, this.maskifyEnv?.HEROSMS_API_KEY,
+          ...(this.redactions || []), ...[record?.firstName, record?.lastName, record?.street, record?.birthDate].filter(value => value?.length >= 4)];
+        if (page && !page.isClosed()) await page.waitForFunction(() => document.readyState !== 'loading' && document.body, { timeout: 2000 }).catch(() => {});
+        const artifact = await captureFailure(browser, path.join(path.dirname(this.store.dbPath), 'registration-failures', id, 'failure.png'), {
+          message: this.safeError(this.state?.stage || 'Registration stopped before success.'),
+          stage: `Registration ${this.state?.failurePhase || this.state?.phase || 'startup'} · ${this.state?.failureCode || 'STOPPED'}`,
+          secrets, preferredPage: page, redactPhones: true, redactUrlQueries: true,
+        });
+        this.store.update(id, { failureImage: { kind: artifact.kind, savedAt: Date.now() } });
+        this.state = { ...this.state, failureImageUrl: `/api/registration/${id}/failure-image`, failureArtifactKind: artifact.kind };
+        this.addLog(`${artifact.kind === 'screenshot' ? 'Failure screenshot' : 'Failure diagnostic image'} saved: ${path.relative(PROJECT_ROOT, artifact.path)}`);
+        return artifact;
+      } catch {
+        this.state = { ...this.state, failureImageError: 'Could not save the failure image. Check disk space and directory permissions.' };
+        this.addLog(`[ERROR] ${this.state.failureImageError}`);
+        return null;
+      }
+    })();
+    return this.failureCapture;
+  }
+
   tableRecords() {
 
     return this.store.db.prepare('SELECT id FROM registrations ORDER BY created_at DESC, id DESC').all().map(({ id }) => {
@@ -1755,7 +1795,9 @@ class RegistrationAssistant extends EventEmitter {
 
         status: ['complete', 'user_confirmed'].includes(record.status) && !isVerifiedRegistration(record) ? 'unverified' : record.status, createdAt: record.created_at, updatedAt: record.updated_at,
 
-        eligible: isVerifiedRegistration(record) && !!record.email };
+        eligible: isVerifiedRegistration(record) && !!record.email,
+        failureImageUrl: ['screenshot', 'diagnostic'].includes(record.failureImage?.kind) ? `/api/registration/${id}/failure-image` : null,
+        failureArtifactKind: record.failureImage?.kind || null };
 
     });
 
@@ -1803,10 +1845,11 @@ class RegistrationAssistant extends EventEmitter {
 
     if (this.browserCleanup) return this.browserCleanup;
 
-    const browser = this.browser; this.browser = null; this.page = null; this.pendingCode = null;
+    const browser = this.browser, page = this.page; this.browser = null; this.page = null; this.pendingCode = null;
 
     const solver = this.solver;
     const cleanup = this.browserCleanup = (async () => {
+      if (this.state?.status !== 'complete') await this.saveFailureImage(browser, page);
       await browser?.close().catch(() => {});
       await solver?.closeProxy().catch(() => {});
     })();
@@ -1828,6 +1871,14 @@ function createRegistrationRouter(registrationAssistant = null, { generateProfil
   const snapshot = () => ({ ...(registrationAssistant?.snapshot() || { active: null, records: [] }), ...(batch ? batch.snapshot() : {}) });
   const sessionFor = id => batch?.session(id) || (registrationAssistant?.activeId === id ? registrationAssistant : null);
   router.get('/state', (_req, res) => res.json(snapshot()));
+
+  const sendFailureImage = (req, res, artifact) => {
+    if (!artifact) return res.sendStatus(404);
+    if (req.query.download === '1') res.attachment(`registration-${req.params.id}-failure${path.extname(artifact.path)}`);
+    res.sendFile(artifact.path);
+  };
+  router.get('/failures/:id/image', (req, res) => sendFailureImage(req, res, batch?.failureImage?.(req.params.id)));
+  router.get('/:id/failure-image', (req, res) => sendFailureImage(req, res, registrationAssistant?.failureImage?.(req.params.id)));
 
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 1, fields: 3, parts: 4, fieldSize: 100 } });
   router.post('/batches', (req, res, next) => {

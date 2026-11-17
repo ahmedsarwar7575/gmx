@@ -42,6 +42,8 @@
           <p id="registration-download-status" class="registration-batch-status" role="status" hidden></p>
           <label id="registration-session-field" class="registration-session-field" hidden>Account session<select id="registration-session" aria-label="Choose account session"></select></label>
           <div id="registration-detail" class="registration-detail" role="status" aria-live="polite">No active registration.</div>
+          <div class="registration-session-actions"><a id="registration-failure-view" class="button button-secondary" target="_blank" rel="noopener noreferrer" hidden>View failure screenshot</a><a id="registration-failure-download" class="button button-secondary" download hidden>Download image</a></div>
+          <p id="registration-failure-error" class="form-error" role="alert" hidden></p>
           <ol class="registration-steps" aria-label="Registration progress"><li class="current" id="step-profile"><span>1</span><strong>Profile</strong></li><li id="step-captcha"><span>2</span><strong>CAPTCHA</strong></li><li id="step-details"><span>3</span><strong>Details</strong></li><li id="step-phone"><span>4</span><strong>SMS</strong></li></ol>
           <p id="registration-captcha" class="registration-captcha" role="status" hidden>Complete the CAPTCHA in Chrome to continue.</p>
           <button type="button" class="button button-secondary registration-inspect" id="registration-inspect" hidden>Retry current step</button>

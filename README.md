@@ -94,6 +94,22 @@ bodies, session URL queries and known credentials are not logged. Ordinary faile
 attempts release their worker for the next already queued account; no replacement
 profiles are created after GMX redirects to registration help.
 
+Unsuccessful registrations save a redacted image before Chrome closes, including
+the GMX help page when it can be captured. Images are stored under
+`data/registration-failures/<registration-id>/failure.png`, with owner-only file
+permissions, separately from POP3/IMAP screenshots. Known passwords, phone numbers,
+email addresses and session-query values are hidden. If Chrome or its page is
+unavailable, a clearly labeled `failure.svg` diagnostic is saved instead. Profile
+preparation failures use the job ID as the folder name. Storage failures are
+reported in the account's log.
+
+Select an account session to **View failure screenshot** or **Download image**.
+Saved-registration rows also provide an image link; those images remain accessible
+after restarting the server. The terminal log prints each saved file's location.
+Files remain local, are ignored by Git, and are not removed when a POP3/IMAP batch
+clears its own screenshots. Failure images provide evidence; they do not change
+the requirement for a verified mailbox redirect before success is recorded.
+
 If the HeroSMS code wait expires, the assistant clicks GMX's enabled
 `resend-code-button` once and resumes checking the same activation and number.
 There is at most one automatic resend per account. Disabled, missing or

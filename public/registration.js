@@ -23,7 +23,7 @@ const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 const connectionFields = document.getElementById("registration-connection");
 const registrationProxyFile = document.getElementById("registration-proxy-file");
 
-let activeId = null;
+let activeId = null, selectedJobId = null;
 let registrationRun = null, registrationSubmitting = false, latestSnapshot = null, autoDownloadAttemptId = null, downloading = false;
 const sessionSelect = document.getElementById("registration-session");
 const downloadButton = document.getElementById("registration-download");
@@ -68,6 +68,7 @@ form.addEventListener("submit", async (e) => {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Registration batch could not start.");
     activeId = null;
+    selectedJobId = null;
     updateUI(data);
   } catch (err) {
     errorEl.textContent = err.message;
@@ -115,7 +116,18 @@ registrationStopButton.addEventListener("click", async () => {
   try { updateUI(await api(`/api/registration/batches/${registrationRun.id}/stop`)); }
   catch (error) { showToast(error.message); }
 });
-sessionSelect.addEventListener("change", () => { activeId = sessionSelect.value; updateUI(latestSnapshot); });
+sessionSelect.addEventListener("change", () => { selectedJobId = sessionSelect.value; updateUI(latestSnapshot); });
+
+function updateFailureImage(url, kind, error) {
+  const view = document.getElementById("registration-failure-view"), download = document.getElementById("registration-failure-download");
+  view.hidden = download.hidden = !url;
+  if (url) {
+    view.href = url; download.href = `${url}?download=1`;
+    view.textContent = kind === "diagnostic" ? "View failure diagnostic" : "View failure screenshot";
+  } else { view.removeAttribute("href"); download.removeAttribute("href"); }
+  const notice = document.getElementById("registration-failure-error");
+  notice.hidden = !error; notice.textContent = error || "";
+}
 
 async function downloadRegistrationExport() {
   if (!registrationRun || registrationRun.active || downloading) return;
@@ -183,28 +195,32 @@ function updateUI(snapshot) {
   latestSnapshot = snapshot;
   registrationRun = snapshot.run || null;
   let active = snapshot.active;
+  let selectedJob = null;
   if (registrationRun) {
     const jobs = registrationRun.jobs;
     const success = jobs.filter(job => job.status === "success").length;
     const failed = jobs.filter(job => job.status === "failed").length;
     const cancelled = jobs.filter(job => job.status === "cancelled").length;
     document.getElementById("registration-batch-status").textContent = `${registrationRun.stopping && registrationRun.active ? "Stopping" : registrationRun.active ? "Running" : "Finished"} · ${success} created · ${failed} failed · ${cancelled} cancelled · ${success + failed + cancelled} / ${jobs.length} finished${registrationRun.error ? ` · ${registrationRun.error}` : ""}`;
-    const sessions = jobs.filter(job => job.session);
-    if (!sessions.some(job => job.registrationId === activeId)) activeId = (sessions.find(job => !job.finishedAt) || sessions[0])?.registrationId || null;
+    const sessions = jobs.filter(job => job.session || job.startedAt || job.screenshotUrl || job.artifactError);
+    if (!sessions.some(job => job.id === selectedJobId)) selectedJobId = (sessions.find(job => !job.finishedAt) || sessions[0])?.id || null;
     sessionSelect.replaceChildren(...sessions.map(job => {
       const option = document.createElement("option");
-      option.value = job.registrationId;
-      option.textContent = `#${job.index} · ${job.session.emailHint} · ${job.status.replace(/_/g, " ")}`;
+      option.value = job.id;
+      option.textContent = `#${job.index} · ${job.session?.emailHint || "Profile preparation"} · ${job.status.replace(/_/g, " ")}`;
       return option;
     }));
-    sessionSelect.value = activeId || "";
+    sessionSelect.value = selectedJobId || "";
     document.getElementById("registration-session-field").hidden = !sessions.length;
-    active = sessions.find(job => job.registrationId === activeId)?.session || null;
+    selectedJob = sessions.find(job => job.id === selectedJobId) || null;
+    active = selectedJob?.session || null;
     if (!registrationRun.active && autoDownloadAttemptId !== registrationRun.id) {
       autoDownloadAttemptId = registrationRun.id;
       void downloadRegistrationExport();
     }
   }
+  updateFailureImage(selectedJob?.screenshotUrl || active?.failureImageUrl, selectedJob?.artifactKind || active?.failureArtifactKind,
+    selectedJob?.artifactError || active?.failureImageError);
   updateRegistrationControls();
   document.getElementById("connection-text").textContent = "Service connected";
   document.getElementById("connection-dot").classList.add("connected");
@@ -238,7 +254,7 @@ function updateUI(snapshot) {
     activeId = null;
     badge.textContent = "Ready";
     badge.className = "badge neutral";
-    detail.textContent = "No active registration.";
+    detail.textContent = selectedJob?.stage || "No active registration.";
     captchaNotice.hidden = true;
     inspectBtn.hidden = true;
     phoneForm.hidden = true;
@@ -364,6 +380,10 @@ function renderRecords() {
     statusCell.append(tableNode("span", `badge ${record.eligible ? "success" : record.status === "failed" ? "danger" : "neutral"}`, record.status.replace(/_/g, " ")));
     const action = tableNode("td"), button = tableNode("button", "row-action", "Details");
     button.type = "button"; button.dataset.credentialsId = record.id; action.append(button);
+    if (record.failureImageUrl) {
+      const image = tableNode("a", "row-action", record.failureArtifactKind === "diagnostic" ? "Diagnostic" : "Screenshot");
+      image.href = record.failureImageUrl; image.target = "_blank"; image.rel = "noopener noreferrer"; action.append(image);
+    }
     row.append(selection, email, passwordCell, name, dob, gender, phone, address, statusCell, action);
     return row;
   });

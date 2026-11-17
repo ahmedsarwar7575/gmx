@@ -31,15 +31,15 @@ async function diagnosticImage(filename, message = "Browser unavailable", stage 
   return { path: filename, kind: "diagnostic" };
 }
 
-async function captureFailure(browser, filename, { message, stage, secrets = [] } = {}) {
+async function captureFailure(browser, filename, { message, stage, secrets = [], preferredPage = null, redactPhones = false, redactUrlQueries = false } = {}) {
   let pages = [];
   try { if (browser?.connected) pages = await browser.pages(); } catch {}
-  const page = pages.findLast((p) => !p.isClosed() && p.url() !== "about:blank") || pages[0];
+  const page = preferredPage && !preferredPage.isClosed() ? preferredPage : pages.findLast((p) => !p.isClosed() && p.url() !== "about:blank") || pages[0];
   if (!page) return diagnosticImage(filename, message, stage);
   const frames = page.frames();
   try {
     await fs.mkdir(path.dirname(filename), { recursive: true, mode: 0o700 });
-    for (const frame of frames) await frame.evaluate((secrets) => {
+    for (const frame of frames) await frame.evaluate(({ secrets, redactPhones, redactUrlQueries }) => {
       const records = [], roots = [document];
       window.__gmxScreenshotRestore = records;
       for (const root of roots) for (const el of root.querySelectorAll("*")) {
@@ -57,10 +57,12 @@ async function captureFailure(browser, filename, { message, stage, secrets = [] 
           let next = node.textContent;
           for (const secret of secrets) if (secret) next = next.split(secret).join("[hidden]");
           next = next.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email hidden]");
+          if (redactPhones) next = next.replace(/\+\d(?:[\d ()-]{5,22}\d)/g, '[phone hidden]');
+          if (redactUrlQueries) next = next.replace(/\b(sid|session|token|activationId|api_key|password)\s*[=:]\s*["']?[^\s"'&<>]+/gi, '$1=[hidden]');
           if (next !== node.textContent) { records.push({ node, text: node.textContent }); node.textContent = next; }
         }
       }
-    }, secrets.filter(Boolean)).catch((error) => { if (!frame.detached) throw error; });
+    }, { secrets: secrets.filter(Boolean), redactPhones, redactUrlQueries }).catch((error) => { if (!frame.detached) throw error; });
     let timer;
     try {
       await Promise.race([

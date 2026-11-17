@@ -3,6 +3,8 @@ const { randomUUID } = require('node:crypto');
 const { parseProxies } = require('../inputs.cjs');
 const { createMaskifyProxy } = require('../maskify.cjs');
 const { generateProfile } = require('../random.js');
+const path = require('node:path');
+const { diagnosticImage } = require('../artifacts.cjs');
 
 const finished = new Set(['complete', 'failed', 'paused', 'cancelled']);
 
@@ -29,6 +31,11 @@ class RegistrationBatchRunner extends EventEmitter {
   snapshot() { return { run: this.run ? structuredClone(this.run) : null }; }
   publish() { this.emit('state', this.snapshot()); }
   session(id) { return [...this.workers.values()].find(worker => worker.activeId === id); }
+  failureImage(id) {
+    const job = this.run?.jobs.find(job => job.id === id);
+    if (job?.artifactKind !== 'diagnostic' || job.screenshotUrl !== `/api/registration/failures/${id}/image`) return null;
+    return { path: path.join(path.dirname(this.assistant.store.dbPath), 'registration-failures', id, 'failure.svg'), kind: 'diagnostic' };
+  }
 
   start(input) {
     if (this.run?.active || this.assistant.starting || this.assistant.browser?.connected) throw new Error('Finish or close the active registration before starting a batch.');
@@ -40,7 +47,7 @@ class RegistrationBatchRunner extends EventEmitter {
       concurrency: Math.min(options.concurrency, options.accountCount), requestedConcurrency: options.concurrency,
       proxyCount: options.proxies.length,
       jobs: Array.from({ length: options.accountCount }, (_, index) => ({ id: randomUUID(), index: index + 1,
-        registrationId: null, status: 'queued', stage: 'Waiting for a worker', session: null, startedAt: null, finishedAt: null })),
+        registrationId: null, status: 'queued', stage: 'Waiting for a worker', session: null, screenshotUrl: null, artifactKind: null, startedAt: null, finishedAt: null })),
     };
     this.assistant.store.createBatch(run.id);
     this.run = run;
@@ -96,6 +103,8 @@ class RegistrationBatchRunner extends EventEmitter {
           job.registrationId = session.id;
         }
         job.session = session;
+        job.screenshotUrl = session.failureImageUrl || null;
+        job.artifactKind = session.failureArtifactKind || null;
         job.stage = session.stage;
         if (session.failureCode === 'GMX_REGISTRATION_HELP') {
           run.blocked = true; run.error = 'GMX opened registration help. New attempts stopped; review the failed registration.';
@@ -140,8 +149,17 @@ class RegistrationBatchRunner extends EventEmitter {
         worker.off('state', update);
         try { await worker.close(); }
         catch { job.status = 'failed'; job.stage = 'Could not close the registration browser.'; }
+        job.session = worker.snapshot().active;
+        job.screenshotUrl = job.session?.failureImageUrl || null;
+        job.artifactKind = job.session?.failureArtifactKind || null;
         if (job.session) job.session.browserOpen = false;
         this.workers.delete(job.id);
+      } else if (job.status === 'failed') {
+        try {
+          const artifact = await diagnosticImage(path.join(path.dirname(this.assistant.store.dbPath), 'registration-failures', job.id, 'failure.png'), job.stage, `Registration profile · ${job.failureCode}`);
+          job.screenshotUrl = `/api/registration/failures/${job.id}/image`; job.artifactKind = artifact.kind;
+          console.log(`[Batch ${run.id.slice(0, 8)} Account ${job.index}] Failure diagnostic image saved: ${artifact.path}`);
+        } catch { job.artifactError = 'Could not save the failure diagnostic image. Check disk space and directory permissions.'; console.error(`[Batch ${run.id.slice(0, 8)} Account ${job.index}] ${job.artifactError}`); }
       }
       job.finishedAt = Date.now();
       this.publish();
