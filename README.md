@@ -125,6 +125,14 @@ existing saved phone numbers are included when the database opens. Failed and
 cancelled attempts retain their number reservations. Manual phone entry uses
 the same duplicate check.
 
+Phone purchases reject overlapping calls and are not repeated after a purchase
+failure. A valid returned number is reserved and saved before its activation ID
+is accepted, so invalid activation metadata cannot drop that number from local
+history. Database startup backfills saved numbers across all registration statuses.
+This covers this installation's saved history; separate installations need a
+shared history to enforce uniqueness across machines. It does not establish that
+a number has never been used by someone else.
+
 Chrome uses an isolated profile with address/payment autofill and password saving
 disabled. Its native browser identity is preserved. All HTTP/HTTPS destinations
 use the selected proxy, including Chrome's usual loopback bypass. QUIC is disabled

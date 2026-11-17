@@ -1197,6 +1197,10 @@ class RegistrationAssistant extends EventEmitter {
 
   async acquirePhone() {
 
+    if (this.stopped || !this.activeId || typeof this.purchasePhone !== 'function') return false;
+    if (['pending', 'failed'].includes(this.phonePurchaseStatus)) return false;
+    if (['provided', 'purchased'].includes(this.phonePurchaseStatus)) return !!this.phoneApproved;
+
     const id = this.activeId;
 
     this.phonePurchaseStatus = 'pending';
@@ -1207,15 +1211,20 @@ class RegistrationAssistant extends EventEmitter {
 
       const number = await this.purchasePhone();
 
-      if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(number?.activationId || ''))) throw new Error('HeroSMS returned an invalid activation ID.');
+      const details = phoneDetails(number?.phoneNumber, undefined, this.store.get(id).country);
 
-      const details = phoneDetails(number.phoneNumber, undefined, this.store.get(id).country);
-
-      const heroSMS = { activationId: String(number.activationId) };
-
-      this.redactions.add(number.phoneNumber); this.redactions.add(details.phone); this.redactions.add(heroSMS.activationId);
+      this.redactions.add(number?.phoneNumber); this.redactions.add(details.phone);
 
       this.store.reservePhone(details, id);
+
+      // Keep known returned numbers in history even if the provider's
+      // activation metadata is invalid. An unsuccessful attempt still owns it.
+      this.store.update(id, { ...details, heroSMS: null });
+
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(number?.activationId || ''))) throw new Error('HeroSMS returned an invalid activation ID. The returned phone number remains reserved.');
+
+      const heroSMS = { activationId: String(number.activationId) };
+      this.redactions.add(heroSMS.activationId);
 
       this.store.update(id, { ...details, heroSMS });
 
